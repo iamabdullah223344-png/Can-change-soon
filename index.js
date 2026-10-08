@@ -10,12 +10,9 @@ const client = new Client({
 
 const prefix = "$";
 
-client.once("ready", () => {
+client.once("clientReady", () => {
   console.log(`✅ ${client.user.tag} is ONLINE!`);
 });
-
-client.on("messageCreate", (message) => {
-  if (message.author.bot) return;
 
   if (message.content.toLowerCase() === `${prefix}ping`) {
     message.reply("🏓 Pong! I'm working!");
