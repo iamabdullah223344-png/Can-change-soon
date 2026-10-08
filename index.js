@@ -11,7 +11,7 @@ const client = new Client({
 const prefix = "$";
 
 client.once("ready", () => {
-  console.log(`✅ ${client.user.tag} is online!`);
+  console.log(`✅ ${client.user.tag} is ONLINE!`);
 });
 
 client.on("messageCreate", (message) => {
@@ -20,4 +20,16 @@ client.on("messageCreate", (message) => {
   if (message.content.toLowerCase() === `${prefix}ping`) {
     message.reply("🏓 Pong! I'm working!");
   }
-})
+});
+
+client.on("error", (error) => {
+  console.error("❌ Discord client error:", error);
+});
+
+process.on("unhandledRejection", (error) => {
+  console.error("❌ Unhandled error:", error);
+});
+
+client.login(process.env.TOKEN).catch((error) => {
+  console.error("❌ LOGIN FAILED:", error);
+});
