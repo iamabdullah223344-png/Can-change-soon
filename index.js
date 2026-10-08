@@ -1,38 +1,31 @@
-// ===============================
-// BALANCE SYSTEM
-// ===============================
+const {
+  Client,
+  GatewayIntentBits
+} = require("discord.js");
 
-const balances = new Map();
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
+});
 
-// $balance
-if (command === "balance") {
-  const userId = message.author.id;
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
 
-  if (!balances.has(userId)) {
-    balances.set(userId, 1000);
+  if (!message.content.startsWith("$")) return;
+
+  const args = message.content.slice(1).trim().split(/ +/);
+  const command = args.shift().toLowerCase();
+
+  if (command === "ping") {
+    return message.reply("🏓 Pong!");
   }
 
-  const balance = balances.get(userId);
-
-  return message.reply(
-    `💰 **${message.author.username}'s Balance**\n\n` +
-    `🪙 **${balance.toLocaleString()} coins**`
-  );
-}
-
-// $bal
-if (command === "bal") {
-  const userId = message.author.id;
-
-  if (!balances.has(userId)) {
-    balances.set(userId, 1000);
+  if (command === "balance" || command === "bal") {
+    return message.reply("💰 Your balance is **1,000 coins**!");
   }
+});
 
-  const balance = balances.get(userId);
-
-  return message.reply(
-    `💰 **Balance:** ${balance.toLocaleString()} 🪙`
-  );
-}
-    
-
+client.login(process.env.TOKEN);
