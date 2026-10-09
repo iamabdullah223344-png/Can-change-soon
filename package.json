@@ -1,12 +1,14 @@
+
 {
-  "name": "Can change soon",
+  "name": "Can change Soon",
   "version": "1.0.0",
-  "description": "My Discord Bot",
+  "description": "hi wsp add me in ur server ! ",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.25.1"
+    "discord.js": "^14.0.0"
   }
 }
+
