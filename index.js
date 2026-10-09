@@ -1,61 +1,47 @@
+const { Client, GatewayIntentBits } = require('discord.js');
 
-console.log("Starting bot...");
+const client = new Client({
+intents: [
+GatewayIntentBits.Guilds,
+GatewayIntentBits.GuildMessages,
+GatewayIntentBits.MessageContent
+]
+});
 
-try {
-  require("dotenv").config();
+const prefix = '!';
 
-  const {
-    Client,
-    GatewayIntentBits
-  } = require("discord.js");
+client.once('ready', () => {
+console.log("Bot is online: ${client.user.tag}");
+});
 
-  const token = process.env.DISCORD_TOKEN;
+client.on('messageCreate', async (message) => {
+if (message.author.bot) return;
+if (!message.content.startsWith(prefix)) return;
 
-  if (!token) {
-    throw new Error("DISCORD_TOKEN is missing from Secrets.");
-  }
+const args = message.content.slice(prefix.length).trim().split(/\s+/);
+const command = args.shift().toLowerCase();
 
-  const client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent
-    ]
-  });
+// Ping command
+if (command === 'ping') {
+    return message.reply('🏓 Pong!');
+}
 
-  client.on("messageCreate", async (message) => {
-    if (message.author.bot) return;
+// Pong command
+if (command === 'pong') {
+    return message.reply('🏓 Ping!');
+}
 
-    const text = message.content.trim().toLowerCase();
+// Merge message content
+if (command === 'say') {
+    const text = args.join(' ');
 
-    try {
-      if (text === "!ping" || text === "ping") {
-        await message.reply("🏓 Pong!");
-      } else if (text === "!pong" || text === "pong") {
-        await message.reply("🏓 Ping!");
-      }
-    } catch (err) {
-      console.error("Reply error:", err);
-    }
-  });
-
-  client.once("ready", () => {
-    console.log(`Bot online: ${client.user.tag}`);
-  });
-
-  client.on("error", (err) => {
-    console.error("Discord client error:", err);
-  });
-
-  client.login(token).catch((err) => {
-    console.error("Login failed:", err.message);
-  });
-
-} catch (err) {
-  console.error("Startup failed:", err);
+    if (!text) {
+        return message.reply('❌ Please provide some text!');
     }
 
+    return message.reply(text);
+}
 
+});
 
-      
-
+client.login(process.env.DISCORD_TOKEN);
