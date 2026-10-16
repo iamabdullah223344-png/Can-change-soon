@@ -164,14 +164,14 @@ client.on("messageCreate", async (message) => {
 
       const embed = new EmbedBuilder()
         .setColor(0x8A2BE2)
-        .setTitle("🎫 NIGHTBLOOM SUPPORT")
+        .setTitle("🎫 GG.Gamerz SUPPORT")
         .setDescription(
           "Need help? Click the button below to open a private ticket.\n\n" +
           "• Be respectful to staff.\n" +
           "• Explain your issue clearly.\n" +
           "• Do not open unnecessary tickets."
         )
-        .setFooter({ text: "Support Team • Nightbloom" });
+        .setFooter({ text: "Support Team • GG.Gamerz" });
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
