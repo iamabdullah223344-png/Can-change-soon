@@ -170,7 +170,7 @@ client.on("messageCreate", async message => {
       const embed = new EmbedBuilder()
         .setColor(0x9B59B6)
         .setTitle("🎫 Support Tickets")
-        .setDescription("Click below to create your private support ticket.");
+        .setDescription("claiming & support & help.");
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
