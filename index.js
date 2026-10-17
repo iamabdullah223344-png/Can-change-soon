@@ -2,12 +2,13 @@
 const {
   Client,
   GatewayIntentBits,
+  Partials,
+  PermissionsBitField,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
-  PermissionFlagsBits
+  ChannelType
 } = require("discord.js");
 
 const client = new Client({
@@ -15,163 +16,161 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions
-  ]
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
 const PREFIX = "$";
+const giveaways = new Map();
 
-client.once("ready", () => {
-  console.log(`✅ Bot online: ${client.user.tag}`);
-});
-
-// Parse giveaway duration: 10s, 5m, 2h, 1d
-function parseDuration(input) {
-  const match = input.match(/^(\d+)(s|m|h|d)$/i);
+function durationMs(value) {
+  const match = /^(\d+)(s|m|h|d)$/i.exec(value || "");
   if (!match) return null;
 
   const amount = Number(match[1]);
-  const units = {
-    s: 1000,
-    m: 60000,
-    h: 3600000,
-    d: 86400000
-  };
+  const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+  const duration = amount * units[match[2].toLowerCase()];
 
-  const duration =
-    amount * units[match[2].toLowerCase()];
-
-  if (
-    !Number.isSafeInteger(duration) ||
-    duration < 1000 ||
-    duration > 30 * 86400000
-  ) return null;
+  if (!Number.isSafeInteger(duration) ||
+      duration < 10000 ||
+      duration > 20 * 86400000) return null;
 
   return duration;
 }
 
-// ALL PREFIX COMMANDS USE THIS SAME HANDLER
-client.on("messageCreate", async (message) => {
+async function finishGiveaway(channel, id, reroll = false) {
+  const data = giveaways.get(id);
+
+  // Only active giveaways created by this running process are stored.
+  if (!data) {
+    if (reroll) throw new Error("Giveaway not found in this bot session.");
+    return;
+  }
+
+  const msg = await channel.messages.fetch(id);
+  const reaction = msg.reactions.cache.get("🎉");
+  const users = reaction ? await reaction.users.fetch() : new Map();
+
+  const entrants = [...users.values()].filter(u => !u.bot);
+  const pool = [...entrants];
+  const winners = [];
+
+  while (pool.length && winners.length < data.winnerCount) {
+    winners.push(pool.splice(
+      Math.floor(Math.random() * pool.length), 1
+    )[0]);
+  }
+
+  if (!reroll) {
+    data.ended = true;
+    clearTimeout(data.timer);
+  }
+
+  const result = winners.length
+    ? winners.map(u => `<@${u.id}>`).join(", ")
+    : "No eligible entrants.";
+
+  await channel.send(
+    `🎉 **${reroll ? "Giveaway reroll" : "Giveaway ended"}!**\n` +
+    `Prize: **${data.prize}**\nWinner(s): ${result}`
+  );
+
+  if (!reroll) giveaways.delete(id);
+}
+
+client.on("messageCreate", async message => {
+  if (!message.guild || message.author.bot ||
+      !message.content.startsWith(PREFIX)) return;
+
+  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const command = (args.shift() || "").toLowerCase();
+
   try {
-    if (message.author.bot || !message.guild) return;
-    if (!message.content.startsWith(PREFIX)) return;
-
-    const args = message.content
-      .slice(PREFIX.length)
-      .trim()
-      .split(/\s+/);
-
-    const command = args.shift()?.toLowerCase();
-
-    // PING
-    if (command === "ping") {
-      return message.reply(
-        `🏓 Pong! ${client.ws.ping}ms`
-      );
+    // PING / PONG
+    if (command === "ping" || command === "pong") {
+      return message.reply(`🏓 Pong! ${client.ws.ping}ms`);
     }
 
-    // GIVEAWAY
+    // CREATE GIVEAWAY: $giveaway 10m 1 Nitro
     if (command === "giveaway") {
-      if (!message.member.permissions.has(
-        PermissionFlagsBits.ManageGuild
-      )) {
-        return message.reply(
-          "❌ You need Manage Server permission."
-        );
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+        return message.reply("❌ You need Manage Server permission.");
       }
 
-      const duration = parseDuration(args[0] || "");
-      const prize = args.slice(1).join(" ");
+      const duration = durationMs(args[0]);
+      const winnerCount = Number(args[1]);
+      const prize = args.slice(2).join(" ");
 
-      if (!duration || !prize) {
-        return message.reply(
-          "Usage: `$giveaway 10m Nitro`"
-        );
+      if (!duration || !Number.isInteger(winnerCount) ||
+          winnerCount < 1 || winnerCount > 20 || !prize) {
+        return message.reply("Usage: `$giveaway 10m 1 Nitro`");
       }
 
-      const endTime = Date.now() + duration;
-
+      const end = Date.now() + duration;
       const embed = new EmbedBuilder()
-        .setColor(0xE91E63)
-        .setTitle("🎉 GIVEAWAY 🎉")
+        .setColor(0xE74C3C)
+        .setTitle("🎉 GIVEAWAY")
         .setDescription(
-          `**Prize:** ${prize}\n\n` +
-          "React with 🎉 to enter!\n\n" +
-          `**Hosted by:** ${message.author}\n` +
-          `**Ends:** <t:${Math.floor(endTime / 1000)}:R>`
+          `**Prize:** ${prize}\n` +
+          `**Winners:** ${winnerCount}\n` +
+          `**Hosted by:** ${message.author}\n\nReact with 🎉 to enter!`
         )
-        .setTimestamp(endTime);
+        .addFields({
+          name: "Ends",
+          value: `<t:${Math.floor(end / 1000)}:R>`
+        });
 
-      const giveaway = await message.channel.send({
-        embeds: [embed]
-      });
+      const giveawayMessage = await message.channel.send({ embeds: [embed] });
+      await giveawayMessage.react("🎉");
 
-      await giveaway.react("🎉");
-      await message.reply("✅ Giveaway started!");
+      const data = {
+        prize,
+        winnerCount,
+        ended: false,
+        timer: null
+      };
 
-      setTimeout(async () => {
+      data.timer = setTimeout(async () => {
         try {
-          const reaction =
-            giveaway.reactions.cache.get("🎉");
-
-          if (!reaction) {
-            return giveaway.reply(
-              "Giveaway ended, but no entries were found."
-            );
-          }
-
-          const users = await reaction.users.fetch();
-          const entrants = users.filter(user => !user.bot);
-
-          if (!entrants.size) {
-            return giveaway.reply(
-              "🎉 Giveaway ended! Nobody entered."
-            );
-          }
-
-          const winner = entrants.random();
-
-          const endedEmbed = EmbedBuilder.from(embed)
-            .setTitle("🎉 GIVEAWAY ENDED 🎉")
-            .setColor(0x2ECC71)
-            .setDescription(
-              `**Prize:** ${prize}\n\n` +
-              `**Winner:** ${winner}\n` +
-              `**Hosted by:** ${message.author}`
-            );
-
-          await giveaway.edit({ embeds: [endedEmbed] });
-          await giveaway.reply(
-            `🎊 Congratulations ${winner}! You won **${prize}**!`
-          );
-        } catch (error) {
-          console.error("Giveaway error:", error);
+          await finishGiveaway(message.channel, giveawayMessage.id);
+        } catch (err) {
+          console.error("Giveaway ending error:", err);
         }
       }, duration);
 
-      return;
+      giveaways.set(giveawayMessage.id, data);
+      data.timer.unref?.();
+
+      return message.reply(`✅ Giveaway created: ${giveawayMessage.url}`);
     }
 
-    // TICKET PANEL
+    // REROLL: $reroll MESSAGE_ID
+    if (command === "reroll") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+        return message.reply("❌ You need Manage Server permission.");
+      }
+
+      const id = args[0];
+      if (!/^\d{17,20}$/.test(id || "")) {
+        return message.reply("Usage: `$reroll MESSAGE_ID`");
+      }
+
+      return await finishGiveaway(message.channel, id, true)
+        .catch(err => message.reply(`❌ ${err.message}`));
+    }
+
+    // TICKET PANEL: $ticketpanel
     if (command === "ticketpanel") {
-      if (!message.member.permissions.has(
-        PermissionFlagsBits.ManageGuild
-      )) {
-        return message.reply(
-          "❌ You need Manage Server permission."
-        );
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        return message.reply("❌ You need Manage Channels permission.");
       }
 
       const embed = new EmbedBuilder()
-        .setColor(0x8A2BE2)
-        .setTitle("🎫 GG.Gamerz SUPPORT")
-        .setDescription(
-          "Need help? Click the button below to open a private ticket.\n\n" +
-          "• Be respectful to staff.\n" +
-          "• Explain your issue clearly.\n" +
-          "• Do not open unnecessary tickets."
-        )
-        .setFooter({ text: "Support Team • GG.Gamerz" });
+        .setColor(0x9B59B6)
+        .setTitle("🎫 Support Tickets")
+        .setDescription("Click below to create your private support ticket.");
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -181,158 +180,150 @@ client.on("messageCreate", async (message) => {
           .setStyle(ButtonStyle.Primary)
       );
 
-      await message.channel.send({
-        embeds: [embed],
-        components: [row]
-      });
+      return message.channel.send({ embeds: [embed], components: [row] });
+    }
 
-      return message.reply("✅ Ticket panel created!");
+    // MUTE/TIMEOUT: $mute @user 10m reason
+    if (command === "mute") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
+        return message.reply("❌ You need Moderate Members permission.");
+      }
+
+      const member = message.mentions.members.first();
+      const duration = durationMs(args[1]);
+      const reason = args.slice(2).join(" ") || "No reason provided";
+
+      if (!member || !duration || duration > 28 * 86400000) {
+        return message.reply("Usage: `$mute @user 10m reason` (10s–20d)");
+      }
+
+      if (member.id === message.author.id || member.user.bot ||
+          !member.moderatable) {
+        return message.reply("❌ I can't timeout that member.");
+      }
+
+      await member.timeout(duration, reason);
+      return message.reply(`🔇 Timed out ${member.user.tag}. Reason: ${reason}`);
+    }
+
+    // BAN: $ban @user reason
+    if (command === "ban") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+        return message.reply("❌ You need Ban Members permission.");
+      }
+
+      const member = message.mentions.members.first();
+      const reason = args.slice(1).join(" ") || "No reason provided";
+
+      if (!member) return message.reply("Usage: `$ban @user reason`");
+      if (member.id === message.author.id || member.user.bot || !member.bannable) {
+        return message.reply("❌ I can't ban that member.");
+      }
+
+      await member.ban({ reason });
+      return message.reply(`🔨 Banned ${member.user.tag}. Reason: ${reason}`);
+    }
+
+    // KICK: $kick @user reason
+    if (command === "kick") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) {
+        return message.reply("❌ You need Kick Members permission.");
+      }
+
+      const member = message.mentions.members.first();
+      const reason = args.slice(1).join(" ") || "No reason provided";
+
+      if (!member) return message.reply("Usage: `$kick @user reason`");
+      if (member.id === message.author.id || member.user.bot || !member.kickable) {
+        return message.reply("❌ I can't kick that member.");
+      }
+
+      await member.kick(reason);
+      return message.reply(`👢 Kicked ${member.user.tag}. Reason: ${reason}`);
     }
   } catch (error) {
-    console.error("Command error:", error);
-    await message.reply(
-      "❌ Command failed. Check the Railway logs."
-    ).catch(() => {});
+    console.error(`Command ${command} error:`, error);
+    return message.reply("❌ Command failed. Check Railway logs and bot permissions.")
+      .catch(() => {});
   }
 });
 
-// TICKET BUTTONS
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isButton()) return;
+// TICKET BUTTON HANDLER
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isButton() ||
+      interaction.customId !== "create_ticket") return;
 
   try {
-    // OPEN TICKET
-    if (interaction.customId === "create_ticket") {
-      const guild = interaction.guild;
-      if (!guild) {
-        return interaction.reply({
-          content: "This button only works in a server.",
-          ephemeral: true
-        });
-      }
-
-      const existing = guild.channels.cache.find(channel =>
-        channel.type === ChannelType.GuildText &&
-        channel.topic === `ticket-owner:${interaction.user.id}`
-      );
-
-      if (existing) {
-        return interaction.reply({
-          content: `You already have a ticket: ${existing}`,
-          ephemeral: true
-        });
-      }
-
-      await interaction.deferReply({ ephemeral: true });
-
-      const safeName = interaction.user.username
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, "")
-        .slice(0, 20) || "user";
-
-      const channel = await guild.channels.create({
-        name: `ticket-${safeName}`,
-        type: ChannelType.GuildText,
-        topic: `ticket-owner:${interaction.user.id}`,
-        permissionOverwrites: [
-          {
-            id: guild.roles.everyone.id,
-            deny: [PermissionFlagsBits.ViewChannel]
-          },
-          {
-            id: interaction.user.id,
-            allow: [
-              PermissionFlagsBits.ViewChannel,
-              PermissionFlagsBits.SendMessages,
-              PermissionFlagsBits.ReadMessageHistory
-            ]
-          },
-          {
-            id: client.user.id,
-            allow: [
-              PermissionFlagsBits.ViewChannel,
-              PermissionFlagsBits.SendMessages,
-              PermissionFlagsBits.ReadMessageHistory,
-              PermissionFlagsBits.ManageChannels
-            ]
-          }
-        ]
+    const guild = interaction.guild;
+    if (!guild) {
+      return interaction.reply({
+        content: "Use this button inside a server.",
+        ephemeral: true
       });
-
-      const closeRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("close_ticket")
-          .setLabel("Close Ticket")
-          .setEmoji("🔒")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      await channel.send({
-        content:
-          `Welcome ${interaction.user}!\n` +
-          "Please explain your issue. Staff will help you soon.",
-        components: [closeRow]
-      });
-
-      return interaction.editReply(
-        `✅ Your private ticket is ready: ${channel}`
-      );
     }
 
-    // CLOSE TICKET
-    if (interaction.customId === "close_ticket") {
-      const channel = interaction.channel;
-      if (!channel || channel.type !== ChannelType.GuildText) {
-        return interaction.reply({
-          content: "This is not a ticket channel.",
-          ephemeral: true
-        });
-      }
+    const existing = guild.channels.cache.find(
+      c => c.name === `ticket-${interaction.user.id}`
+    );
 
-      const isOwner =
-        channel.topic === `ticket-owner:${interaction.user.id}`;
-
-      const isStaff =
-        interaction.memberPermissions?.has(
-          PermissionFlagsBits.ManageChannels
-        );
-
-      if (!isOwner && !isStaff) {
-        return interaction.reply({
-          content: "❌ Only the ticket owner or staff can close this ticket.",
-          ephemeral: true
-        });
-      }
-
-      await interaction.reply({
-        content: "🔒 Closing ticket in 3 seconds..."
+    if (existing) {
+      return interaction.reply({
+        content: `You already have a ticket: ${existing}`,
+        ephemeral: true
       });
+    }
 
-      setTimeout(async () => {
-        try {
-          await channel.delete("Ticket closed");
-        } catch (error) {
-          console.error("Ticket close error:", error);
+    const channel = await guild.channels.create({
+      name: `ticket-${interaction.user.id}`,
+      type: ChannelType.GuildText,
+      permissionOverwrites: [
+        {
+          id: guild.roles.everyone.id,
+          deny: [PermissionsBitField.Flags.ViewChannel]
+        },
+        {
+          id: interaction.user.id,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory
+          ]
+        },
+        {
+          id: client.user.id,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ManageChannels
+          ]
         }
-      }, 3000);
-    }
+      ]
+    });
+
+    await channel.send(`Welcome ${interaction.user}! Please describe your issue.`);
+    return interaction.reply({
+      content: `✅ Ticket created: ${channel}`,
+      ephemeral: true
+    });
   } catch (error) {
     console.error("Ticket error:", error);
-
     const reply = {
-      content: "❌ Ticket action failed. Check bot permissions.",
+      content: "❌ Couldn't create ticket. Check bot permissions.",
       ephemeral: true
     };
 
-    if (interaction.deferred) {
-      await interaction.editReply(reply).catch(() => {});
-    } else if (!interaction.replied) {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp(reply).catch(() => {});
+    } else {
       await interaction.reply(reply).catch(() => {});
     }
   }
 });
 
-// LOGIN
-client.login(process.env.DISCORD_TOKEN).catch(error => {
-  console.error("Bot login failed:", error);
+client.once("ready", () => {
+  console.log(`✅ Bot online as ${client.user.tag}`);
+});
+
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+  console.error("Login failed. Check Railway DISCORD_TOKEN:", err);
 });
