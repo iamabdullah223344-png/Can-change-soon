@@ -1,324 +1,597 @@
 
 const {
-  Client, GatewayIntentBits, Partials, PermissionsBitField,
-  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  ChannelType
+  Client,
+  GatewayIntentBits,
+  Partials,
+  PermissionsBitField,
+  ChannelType,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require("discord.js");
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.Reaction]
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.Reaction
+  ]
 });
 
 const PREFIX = "$";
+
+// Configure these in Railway Variables.
+const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID || "";
+const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || "";
+
 const giveaways = new Map();
-const tickets = new Map();
+const timers = new Map();
+const warnings = new Map();
+const activeTickets = new Set();
 
-function durationMs(value) {
-  const m = /^(\d+)(s|m|h|d)$/i.exec(value || "");
-  if (!m) return null;
-  const n = Number(m[1]);
-  const unit = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
-  const ms = n * unit[m[2].toLowerCase()];
-  return Number.isSafeInteger(ms) && ms >= 10000 &&
-    ms <= 20 * 86400000 ? ms : null;
-}
+client.once("ready", () => {
+  console.log(`✅ Online as ${client.user.tag}`);
+});
 
-function has(message, permission) {
-  return message.member.permissions.has(permission);
-}
+// ---------- HELPERS ----------
 
-function isTicket(channel) {
-  return channel && channel.type === ChannelType.GuildText &&
-    tickets.has(channel.id);
-}
-
-async function finishGiveaway(channel, id, reroll = false) {
-  const data = giveaways.get(id);
-  if (!data) throw new Error("Giveaway not found in this bot session.");
-
-  const msg = await channel.messages.fetch(id);
-  const reaction = msg.reactions.cache.get("🎉");
-  const users = reaction ? await reaction.users.fetch() : new Map();
-  const pool = [...users.values()].filter(u => !u.bot);
-  const winners = [];
-
-  while (pool.length && winners.length < data.count) {
-    winners.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
-  }
-
-  if (!reroll) {
-    clearTimeout(data.timer);
-    giveaways.delete(id);
-  }
-
-  const result = winners.length
-    ? winners.map(u => `<@${u.id}>`).join(", ")
-    : "No eligible entrants.";
-
-  await channel.send(
-    `🎉 **${reroll ? "Giveaway reroll" : "Giveaway ended"}**\n` +
-    `Prize: **${data.prize}**\nWinner(s): ${result}`
+function isStaff(message) {
+  return message.member.permissions.has(
+    PermissionsBitField.Flags.ManageMessages
   );
 }
 
-client.on("messageCreate", async message => {
-  if (!message.guild || message.author.bot ||
-      !message.content.startsWith(PREFIX)) return;
+function parseDuration(input) {
+  const match = input.match(/^(\d+)(s|m|h|d)$/i);
+  if (!match) return null;
+
+  const n = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const multiplier = {
+    s: 1000,
+    m: 60000,
+    h: 3600000,
+    d: 86400000
+  }[unit];
+
+  const ms = n * multiplier;
+  return ms > 0 && ms <= 30 * 86400000 ? ms : null;
+}
+
+async function safeReply(message, content) {
+  try {
+    await message.reply(content);
+  } catch (error) {
+    console.error("Reply failed:", error.message);
+  }
+}
+
+// ---------- PREFIX COMMAND HANDLER ----------
+
+client.on("messageCreate", async (message) => {
+  if (!message.guild || message.author.bot) return;
+  if (!message.content.startsWith(PREFIX)) return;
 
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const cmd = (args.shift() || "").toLowerCase();
+  const command = (args.shift() || "").toLowerCase();
 
   try {
-    // PING / PONG
-    if (cmd === "ping" || cmd === "pong") {
-      return message.reply(`🏓 Pong! WebSocket: ${client.ws.ping}ms`);
+
+    // ---------- 1. PING / PONG ----------
+
+    if (command === "ping") {
+      return safeReply(
+        message,
+        `🏓 Pong! API latency: ${client.ws.ping}ms`
+      );
     }
 
-    // PREMIUM TICKET PANEL
-    if (cmd === "ticketpanel") {
-      if (!has(message, PermissionsBitField.Flags.ManageChannels))
-        return message.reply("❌ You need Manage Channels permission.");
+    if (command === "pong") {
+      return safeReply(message, "🏓 Ping received!");
+    }
+
+    // ---------- 2. GIVEAWAY ----------
+
+    if (command === "giveaway") {
+      if (!isStaff(message)) {
+        return safeReply(message, "❌ You need Manage Messages.");
+      }
+
+      const duration = parseDuration(args[0] || "");
+      const winners = Number(args[1]);
+      const prize = args.slice(2).join(" ");
+
+      if (!duration || !Number.isInteger(winners) ||
+          winners < 1 || winners > 20 || !prize) {
+        return safeReply(
+          message,
+          "Usage: `$giveaway 10m 1 Nitro Prize`"
+        );
+      }
+
+      const endAt = Date.now() + duration;
 
       const embed = new EmbedBuilder()
-        .setColor(0x8B5CF6)
-        .setAuthor({
-          name: `${message.guild.name} • SUPPORT CENTER`,
-          iconURL: message.guild.iconURL() || undefined
-        })
-        .setTitle("✦ NIGHTBLOOM | TICKET SUPPORT")
+        .setColor(0xB00020)
+        .setTitle("🎉 GIVEAWAY")
         .setDescription(
-          "Welcome to our premium support center.\n\n" +
-          "Need help with a purchase, partnership, report, or general question?\n\n" +
-          "୨୧ **How it works**\n" +
-          "・ Press **Open a Ticket** below.\n" +
-          "・ Describe your issue clearly.\n" +
-          "・ Our team will assist you privately.\n\n" +
-          "୨୧ **Before opening**\n" +
-          "Please do not spam tickets. Share proof or screenshots when relevant."
+          `**Prize:** ${prize}\n` +
+          `**Winners:** ${winners}\n` +
+          `**Ends:** <t:${Math.floor(endAt / 1000)}:R>\n\n` +
+          "React with 🎉 to enter!"
         )
-        .addFields(
-          { name: "🔒 Privacy", value: "Only you and authorized staff can view your ticket.", inline: true },
-          { name: "⚡ Support", value: "Our team will respond when available.", inline: true }
-        )
-        .setFooter({ text: "Nightbloom Support • Keep it respectful" })
-        .setTimestamp();
+        .setFooter({ text: "Good luck!" });
+
+      const giveawayMessage = await message.channel.send({
+        embeds: [embed]
+      });
+
+      await giveawayMessage.react("🎉");
+
+      giveaways.set(giveawayMessage.id, {
+        channelId: message.channel.id,
+        guildId: message.guild.id,
+        prize,
+        winners,
+        endAt,
+        ended: false
+      });
+
+      setTimeout(async () => {
+        const giveaway = giveaways.get(giveawayMessage.id);
+        if (!giveaway || giveaway.ended) return;
+
+        try {
+          const fetched = await message.channel.messages.fetch(
+            giveawayMessage.id
+          );
+          const reaction = fetched.reactions.cache.get("🎉");
+
+          const users = reaction
+            ? await reaction.users.fetch()
+            : null;
+
+          const entrants = users
+            ? users.filter(u => !u.bot).map(u => u.id)
+            : [];
+
+          giveaway.ended = true;
+
+          const picked = entrants
+            .sort(() => Math.random() - 0.5)
+            .slice(0, giveaway.winners);
+
+          await message.channel.send(
+            picked.length
+              ? `🎉 Giveaway ended! Winner(s): ${picked.map(id => `<@${id}>`).join(", ")}\nPrize: **${giveaway.prize}**`
+              : `Giveaway ended: **${giveaway.prize}**. No valid entries.`
+          );
+        } catch (error) {
+          console.error("Giveaway end failed:", error.message);
+        }
+      }, duration);
+
+      return;
+    }
+
+    if (command === "end" || command === "reroll") {
+      if (!isStaff(message)) {
+        return safeReply(message, "❌ Staff only.");
+      }
+
+      const id = args[0];
+      const giveaway = giveaways.get(id);
+
+      if (!giveaway) {
+        return safeReply(
+          message,
+          "Giveaway not found. Usage: `$end MESSAGE_ID` or `$reroll MESSAGE_ID`"
+        );
+      }
+
+      if (command === "end") {
+        giveaway.ended = true;
+        return safeReply(message, `🛑 Ended giveaway for **${giveaway.prize}**.`);
+      }
+
+      try {
+        const channel = await client.channels.fetch(giveaway.channelId);
+        const giveawayMessage = await channel.messages.fetch(id);
+        const reaction = giveawayMessage.reactions.cache.get("🎉");
+        const users = reaction ? await reaction.users.fetch() : null;
+        const entrants = users
+          ? users.filter(u => !u.bot).map(u => u.id)
+          : [];
+
+        if (!entrants.length) {
+          return safeReply(message, "No valid giveaway entrants found.");
+        }
+
+        const winner = entrants[
+          Math.floor(Math.random() * entrants.length)
+        ];
+
+        return safeReply(
+          message,
+          `🎉 New winner: <@${winner}> — **${giveaway.prize}**`
+        );
+      } catch {
+        return safeReply(message, "Could not fetch that giveaway.");
+      }
+    }
+
+    // ---------- 3. TICKET PANEL ----------
+
+    if (command === "ticketpanel") {
+      if (!isStaff(message)) {
+        return safeReply(message, "❌ Staff only.");
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0xB00020)
+        .setTitle("🎫 Support Center")
+        .setDescription(
+          "Need help? Open a private ticket below.\n" +
+          "Our staff will assist you as soon as possible."
+        );
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("ticket_open")
-          .setLabel("Open a Ticket")
+          .setLabel("Open Ticket")
           .setEmoji("🎫")
-          .setStyle(ButtonStyle.Primary)
+          .setStyle(ButtonStyle.Danger)
       );
 
-      return message.channel.send({ embeds: [embed], components: [row] });
-    }
-
-    // ADD MEMBER TO TICKET
-    if (cmd === "add") {
-      if (!isTicket(message.channel))
-        return message.reply("❌ Use this inside a ticket.");
-      if (!has(message, PermissionsBitField.Flags.ManageChannels))
-        return message.reply("❌ Staff only.");
-      const member = message.mentions.members.first();
-      if (!member) return message.reply("Usage: `$add @user`");
-
-      await message.channel.permissionOverwrites.edit(member.id, {
-        ViewChannel: true, SendMessages: true, ReadMessageHistory: true
-      });
-      return message.reply(`✅ Added ${member} to this ticket.`);
-    }
-
-    // REMOVE MEMBER FROM TICKET
-    if (cmd === "remove") {
-      if (!isTicket(message.channel))
-        return message.reply("❌ Use this inside a ticket.");
-      if (!has(message, PermissionsBitField.Flags.ManageChannels))
-        return message.reply("❌ Staff only.");
-      const member = message.mentions.members.first();
-      if (!member) return message.reply("Usage: `$remove @user`");
-
-      await message.channel.permissionOverwrites.delete(member.id);
-      return message.reply(`✅ Removed ${member} from this ticket.`);
-    }
-
-    // CLOSE TICKET
-    if (cmd === "close") {
-      if (!isTicket(message.channel))
-        return message.reply("❌ This isn't a ticket.");
-      const owner = tickets.get(message.channel.id);
-      const staff = has(message, PermissionsBitField.Flags.ManageChannels);
-      if (message.author.id !== owner && !staff)
-        return message.reply("❌ Only the ticket owner or staff can close it.");
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("ticket_confirm_close")
-          .setLabel("Confirm Close")
-          .setEmoji("🔒")
-          .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-          .setCustomId("ticket_cancel_close")
-          .setLabel("Cancel")
-          .setStyle(ButtonStyle.Secondary)
-      );
-
-      return message.reply({
-        content: "Are you sure you want to close this ticket?",
+      await message.channel.send({
+        embeds: [embed],
         components: [row]
       });
-    }
 
-    // CREATE GIVEAWAY: $giveaway 10m 1 Nitro
-    if (cmd === "giveaway") {
-      if (!has(message, PermissionsBitField.Flags.ManageGuild))
-        return message.reply("❌ Manage Server permission required.");
-
-      const ms = durationMs(args[0]);
-      const count = Number(args[1]);
-      const prize = args.slice(2).join(" ");
-      if (!ms || !Number.isInteger(count) || count < 1 ||
-          count > 20 || !prize)
-        return message.reply("Usage: `$giveaway 10m 1 Nitro`");
-
-      const end = Date.now() + ms;
-      const embed = new EmbedBuilder()
-        .setColor(0x8B5CF6)
-        .setTitle("🎉 NIGHTBLOOM GIVEAWAY")
-        .setDescription(
-          `**Prize:** ${prize}\n**Winners:** ${count}\n` +
-          `**Hosted by:** ${message.author}\n\nReact with 🎉 to enter!`
-        )
-        .addFields({ name: "Ends", value: `<t:${Math.floor(end / 1000)}:R>` });
-
-      const giveaway = await message.channel.send({ embeds: [embed] });
-      await giveaway.react("🎉");
-
-      const data = { count, prize, timer: null };
-      data.timer = setTimeout(async () => {
-        try {
-          await finishGiveaway(message.channel, giveaway.id);
-        } catch (e) {
-          console.error("Giveaway end:", e);
-        }
-      }, ms);
-      data.timer.unref?.();
-      giveaways.set(giveaway.id, data);
-
-      return message.reply(`✅ Giveaway created: ${giveaway.url}`);
-    }
-
-    // REROLL: $reroll MESSAGE_ID
-    if (cmd === "reroll") {
-      if (!has(message, PermissionsBitField.Flags.ManageGuild))
-        return message.reply("❌ Manage Server permission required.");
-      if (!/^\d{17,20}$/.test(args[0] || ""))
-        return message.reply("Usage: `$reroll MESSAGE_ID`");
-      await finishGiveaway(message.channel, args[0], true);
       return;
     }
 
-    // MUTE: $mute @user 10m reason
-    if (cmd === "mute") {
-      if (!has(message, PermissionsBitField.Flags.ModerateMembers))
-        return message.reply("❌ Moderate Members permission required.");
-      const member = message.mentions.members.first();
-      const ms = durationMs(args[1]);
-      const reason = args.slice(2).join(" ") || "No reason provided";
-      if (!member || !ms || ms > 28 * 86400000)
-        return message.reply("Usage: `$mute @user 10m reason`");
-      if (member.id === message.author.id || member.user.bot ||
-          !member.moderatable)
-        return message.reply("❌ I can't timeout that member.");
-      await member.timeout(ms, reason);
-      return message.reply(`🔇 Timed out ${member.user.tag}. Reason: ${reason}`);
+    if (command === "close") {
+      if (!message.channel.name.startsWith("ticket-")) {
+        return safeReply(message, "This isn't a ticket channel.");
+      }
+
+      if (!isStaff(message) &&
+          !message.channel.permissionsFor(message.author)
+            .has(PermissionsBitField.Flags.ViewChannel)) {
+        return safeReply(message, "You cannot close this ticket.");
+      }
+
+      await safeReply(message, "🔒 Closing ticket...");
+      setTimeout(() => message.channel.delete().catch(() => {}), 2000);
+      return;
     }
 
-    // BAN
-    if (cmd === "ban") {
-      if (!has(message, PermissionsBitField.Flags.BanMembers))
-        return message.reply("❌ Ban Members permission required.");
+    // ---------- 4. VERIFICATION PANEL ----------
+
+    if (command === "verifysetup") {
+      if (!isStaff(message)) {
+        return safeReply(message, "❌ Staff only.");
+      }
+
+      if (!VERIFY_ROLE_ID) {
+        return safeReply(
+          message,
+          "Set VERIFY_ROLE_ID in Railway Variables first."
+        );
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0xB00020)
+        .setTitle("🛡️ Server Verification")
+        .setDescription("Click the button below to receive your verified role.");
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("verify_member")
+          .setLabel("Verify Me")
+          .setEmoji("✅")
+          .setStyle(ButtonStyle.Success)
+      );
+
+      await message.channel.send({
+        embeds: [embed],
+        components: [row]
+      });
+
+      return;
+    }
+
+    // ---------- 5. MODERATION ----------
+
+    if (["ban", "kick", "mute", "unmute", "warn"].includes(command)) {
+      if (!isStaff(message)) {
+        return safeReply(message, "❌ You need Manage Messages.");
+      }
+
       const member = message.mentions.members.first();
+      if (!member) {
+        return safeReply(message, `Usage: \`$${command} @member [reason]\``);
+      }
+
+      if (member.id === message.author.id ||
+          member.id === client.user.id) {
+        return safeReply(message, "❌ You cannot target yourself or the bot.");
+      }
+
       const reason = args.slice(1).join(" ") || "No reason provided";
-      if (!member) return message.reply("Usage: `$ban @user reason`");
-      if (member.id === message.author.id || member.user.bot || !member.bannable)
-        return message.reply("❌ I can't ban that member.");
-      await member.ban({ reason });
-      return message.reply(`🔨 Banned ${member.user.tag}. Reason: ${reason}`);
+
+      if (command === "warn") {
+        const key = `${message.guild.id}:${member.id}`;
+        const list = warnings.get(key) || [];
+        list.push(reason);
+        warnings.set(key, list);
+
+        return safeReply(
+          message,
+          `⚠️ ${member.user.tag} warned. Total this session: ${list.length}\nReason: ${reason}`
+        );
+      }
+
+      if (!member.manageable && command !== "ban") {
+        return safeReply(message, "❌ My role is too low to manage that member.");
+      }
+
+      if (command === "ban") {
+        if (!member.bannable) {
+          return safeReply(message, "❌ I cannot ban that member.");
+        }
+        await member.ban({ reason });
+        return safeReply(message, `🔨 Banned ${member.user.tag}. Reason: ${reason}`);
+      }
+
+      if (command === "kick") {
+        if (!member.kickable) {
+          return safeReply(message, "❌ I cannot kick that member.");
+        }
+        await member.kick(reason);
+        return safeReply(message, `👢 Kicked ${member.user.tag}.`);
+      }
+
+      if (command === "mute") {
+        const duration = parseDuration(args[1] || "10m");
+        if (!duration || duration > 28 * 86400000) {
+          return safeReply(message, "Usage: `$mute @member 10m reason`");
+        }
+
+        await member.timeout(duration, reason);
+        return safeReply(message, `🔇 Timed out ${member.user.tag}.`);
+      }
+
+      if (command === "unmute") {
+        await member.timeout(null, reason);
+        return safeReply(message, `🔊 Removed timeout from ${member.user.tag}.`);
+      }
     }
 
-    // KICK
-    if (cmd === "kick") {
-      if (!has(message, PermissionsBitField.Flags.KickMembers))
-        return message.reply("❌ Kick Members permission required.");
-      const member = message.mentions.members.first();
-      const reason = args.slice(1).join(" ") || "No reason provided";
-      if (!member) return message.reply("Usage: `$kick @user reason`");
-      if (member.id === message.author.id || member.user.bot || !member.kickable)
-        return message.reply("❌ I can't kick that member.");
-      await member.kick(reason);
-      return message.reply(`👢 Kicked ${member.user.tag}. Reason: ${reason}`);
+    // ---------- 6. CHANNEL LOCK / UNLOCK ----------
+
+    if (command === "lock" || command === "unlock") {
+      if (!message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )) {
+        return safeReply(message, "❌ You need Manage Channels.");
+      }
+
+      const everyone = message.guild.roles.everyone;
+      await message.channel.permissionOverwrites.edit(everyone, {
+        SendMessages: command === "unlock" ? null : false
+      });
+
+      return safeReply(
+        message,
+        command === "lock" ? "🔒 Channel locked." : "🔓 Channel unlocked."
+      );
     }
 
-    // PURGE: $purge 10
-    if (cmd === "purge") {
-      if (!has(message, PermissionsBitField.Flags.ManageMessages))
-        return message.reply("❌ Manage Messages permission required.");
-      const count = Number(args[0]);
-      if (!Number.isInteger(count) || count < 1 || count > 100)
-        return message.reply("Usage: `$purge 10` (1–100)");
-      const deleted = await message.channel.bulkDelete(count, true);
-      const notice = await message.channel.send(`🧹 Deleted ${deleted.size} messages.`);
+    // ---------- 7. MEMBER COUNT ----------
+
+    if (command === "members") {
+      await message.guild.members.fetch({ withPresences: true }).catch(() => {});
+      const total = message.guild.memberCount;
+      const online = message.guild.members.cache.filter(
+        m => m.presence && m.presence.status !== "offline"
+      ).size;
+
+      return safeReply(
+        message,
+        `👥 **${message.guild.name}**\nTotal members: **${total}**\nOnline: **${online}**`
+      );
+    }
+
+    // ---------- 8. TIMER START / STOP ----------
+
+    if (command === "timer") {
+      const action = (args[0] || "").toLowerCase();
+      const key = `${message.guild.id}:${message.channel.id}`;
+
+      if (action === "stop") {
+        const existing = timers.get(key);
+        if (existing) clearTimeout(existing);
+        timers.delete(key);
+        return safeReply(message, "⏹️ Timer stopped.");
+      }
+
+      if (action !== "start") {
+        return safeReply(message, "Usage: `$timer start 60s` or `$timer stop`");
+      }
+
+      const duration = parseDuration(args[1] || "");
+      if (!duration) {
+        return safeReply(message, "Use a duration like `60s`, `5m`, or `1h`.");
+      }
+
+      if (timers.has(key)) clearTimeout(timers.get(key));
+
+      await safeReply(
+        message,
+        `⏱️ Timer started for **${args[1]}**!`
+      );
+
+      const timer = setTimeout(async () => {
+        timers.delete(key);
+        await message.channel.send(`⏰ <@${message.author.id}> Your timer is up!`)
+          .catch(() => {});
+      }, duration);
+
+      timers.set(key, timer);
+      return;
+    }
+
+    // ---------- 9. FUN / OW0-STYLE MINI GAMES ----------
+
+    if (command === "coinflip") {
+      return safeReply(
+        message,
+        `🪙 ${Math.random() < 0.5 ? "Heads" : "Tails"}!`
+      );
+    }
+
+    if (command === "dice") {
+      return safeReply(
+        message,
+        `🎲 You rolled **${Math.floor(Math.random() * 6) + 1}**!`
+      );
+    }
+
+    if (command === "slots") {
+      const symbols = ["🍒", "🍋", "💎", "⭐", "🍀"];
+      const roll = () => symbols[Math.floor(Math.random() * symbols.length)];
+      const a = roll(), b = roll(), c = roll();
+
+      return safeReply(
+        message,
+        `🎰 **[ ${a} | ${b} | ${c} ]**\n` +
+        (a === b && b === c ? "🎉 Jackpot!" : "Try again!")
+      );
+    }
+
+    if (command === "hunt") {
+      const creatures = ["🐺 Wolf", "🦊 Fox", "🐉 Dragon", "🐱 Cat"];
+      return safeReply(
+        message,
+        `🏹 You found **${creatures[Math.floor(Math.random() * creatures.length)]}**!`
+      );
+    }
+
+    if (command === "battle") {
+      const power = Math.floor(Math.random() * 100) + 1;
+      return safeReply(
+        message,
+        `⚔️ Your battle power is **${power}**! ${
+          power >= 70 ? "Victory!" : "Train and try again!"
+        }`
+      );
+    }
+
+    // ---------- 10. SPECIAL PURGE ----------
+
+    if (command === "purge") {
+      if (!message.member.permissions.has(
+        PermissionsBitField.Flags.ManageMessages
+      )) {
+        return safeReply(message, "❌ You need Manage Messages.");
+      }
+
+      const amount = Number(args[0]);
+
+      if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
+        return safeReply(message, "Usage: `$purge 50` (1–100 messages)");
+      }
+
+      if (!message.channel.bulkDelete) {
+        return safeReply(message, "❌ This channel doesn't support bulk delete.");
+      }
+
+      const deleted = await message.channel.bulkDelete(amount, true);
+
+      const notice = await message.channel.send(
+        `🧹 Purged **${deleted.size}** recent messages.`
+      );
+
       setTimeout(() => notice.delete().catch(() => {}), 4000);
+      return;
     }
+
   } catch (error) {
-    console.error(`Command ${cmd} error:`, error);
-    await message.reply("❌ Command failed. Check bot permissions and Railway logs.")
-      .catch(() => {});
+    console.error(`Command ${command} failed:`, error);
+    await safeReply(message, "❌ Command failed. Check the Railway logs.");
   }
 });
 
-// TICKET BUTTONS
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isButton()) return;
+// ---------- BUTTON HANDLER: TICKETS + VERIFICATION ----------
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton() || !interaction.guild) return;
 
   try {
-    if (interaction.customId === "ticket_open") {
-      const guild = interaction.guild;
-      if (!guild) return interaction.reply({ content: "Server only.", ephemeral: true });
-
-      const existing = guild.channels.cache.find(c =>
-        c.type === ChannelType.GuildText &&
-        tickets.get(c.id) === interaction.user.id
-      );
-
-      if (existing) {
+    if (interaction.customId === "verify_member") {
+      if (!VERIFY_ROLE_ID) {
         return interaction.reply({
-          content: `You already have a ticket: ${existing}`,
+          content: "Verification role is not configured.",
           ephemeral: true
         });
       }
 
-      const channel = await guild.channels.create({
+      const member = await interaction.guild.members.fetch(
+        interaction.user.id
+      );
+
+      const role = await interaction.guild.roles.fetch(VERIFY_ROLE_ID);
+
+      if (!role || !role.editable) {
+        return interaction.reply({
+          content: "Verification role is missing or above my bot role.",
+          ephemeral: true
+        });
+      }
+
+      await member.roles.add(role);
+      return interaction.reply({
+        content: "✅ You are now verified!",
+        ephemeral: true
+      });
+    }
+
+    if (interaction.customId === "ticket_open") {
+      const key = `${interaction.guild.id}:${interaction.user.id}`;
+
+      if (activeTickets.has(key)) {
+        return interaction.reply({
+          content: "You already have a ticket open.",
+          ephemeral: true
+        });
+      }
+
+      const channel = await interaction.guild.channels.create({
         name: `ticket-${interaction.user.username}`
-          .toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 85),
+          .toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 80),
         type: ChannelType.GuildText,
+        parent: TICKET_CATEGORY_ID || undefined,
         permissionOverwrites: [
-          { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+          {
+            id: interaction.guild.roles.everyone.id,
+            deny: [PermissionsBitField.Flags.ViewChannel]
+          },
           {
             id: interaction.user.id,
             allow: [
               PermissionsBitField.Flags.ViewChannel,
               PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory,
-              PermissionsBitField.Flags.AttachFiles
+              PermissionsBitField.Flags.ReadMessageHistory
             ]
           },
           {
@@ -326,117 +599,79 @@ client.on("interactionCreate", async interaction => {
             allow: [
               PermissionsBitField.Flags.ViewChannel,
               PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory,
               PermissionsBitField.Flags.ManageChannels
             ]
           }
         ]
       });
 
-      tickets.set(channel.id, interaction.user.id);
-
-      const embed = new EmbedBuilder()
-        .setColor(0x8B5CF6)
-        .setTitle("🎫 Your Support Ticket")
-        .setDescription(
-          `Welcome ${interaction.user}!\n\n` +
-          "Please describe your issue with as much detail as possible.\n" +
-          "A staff member will help you when available."
-        )
-        .setFooter({ text: "Nightbloom Support • Keep this ticket respectful" });
+      activeTickets.add(key);
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId("ticket_close_button")
+          .setCustomId("ticket_close")
           .setLabel("Close Ticket")
-          .setEmoji("🔒")
           .setStyle(ButtonStyle.Danger)
       );
 
       await channel.send({
-        content: `${interaction.user}`,
-        embeds: [embed],
+        content: `Welcome <@${interaction.user.id}>! Describe your issue here.`,
         components: [row]
       });
 
       return interaction.reply({
-        content: `✨ Your private ticket is ready: ${channel}`,
+        content: `🎫 Ticket created: ${channel}`,
         ephemeral: true
       });
     }
 
-    if (interaction.customId === "ticket_close_button") {
-      if (!isTicket(interaction.channel))
-        return interaction.reply({ content: "Ticket not found.", ephemeral: true });
+    if (interaction.customId === "ticket_close") {
+      if (!interaction.channel.name.startsWith("ticket-")) {
+        return interaction.reply({
+          content: "This is not a ticket.",
+          ephemeral: true
+        });
+      }
 
-      const owner = tickets.get(interaction.channel.id);
+      const allowed = interaction.channel.permissionsFor(
+        interaction.user.id
+      )?.has(PermissionsBitField.Flags.ViewChannel);
+
       const staff = interaction.memberPermissions?.has(
         PermissionsBitField.Flags.ManageChannels
       );
 
-      if (interaction.user.id !== owner && !staff)
+      if (!allowed && !staff) {
         return interaction.reply({
-          content: "Only the ticket owner or staff can close it.",
+          content: "You cannot close this ticket.",
           ephemeral: true
         });
+      }
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("ticket_confirm_close")
-          .setLabel("Confirm Close")
-          .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-          .setCustomId("ticket_cancel_close")
-          .setLabel("Cancel")
-          .setStyle(ButtonStyle.Secondary)
+      await interaction.reply("🔒 Closing ticket...");
+      setTimeout(
+        () => interaction.channel.delete().catch(() => {}),
+        2000
       );
-
-      return interaction.reply({
-        content: "Are you sure you want to close this ticket?",
-        components: [row],
-        ephemeral: true
-      });
-    }
-
-    if (interaction.customId === "ticket_confirm_close") {
-      const channel = interaction.channel;
-      if (!isTicket(channel))
-        return interaction.reply({ content: "Ticket already closed.", ephemeral: true });
-
-      await interaction.reply({
-        content: "🔒 Ticket closed. This channel will be deleted in 5 seconds.",
-        ephemeral: true
-      });
-
-      tickets.delete(channel.id);
-      setTimeout(() => channel.delete("Ticket closed").catch(console.error), 5000);
-      return;
-    }
-
-    if (interaction.customId === "ticket_cancel_close") {
-      return interaction.update({
-        content: "Ticket closure cancelled.",
-        components: []
-      });
     }
   } catch (error) {
-    console.error("Ticket interaction error:", error);
-    const response = {
-      content: "❌ Ticket action failed. Check bot permissions.",
-      ephemeral: true
-    };
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(response).catch(() => {});
-    } else {
-      await interaction.reply(response).catch(() => {});
+    console.error("Button failed:", error);
+
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: "❌ Something went wrong. Check bot permissions and logs.",
+        ephemeral: true
+      }).catch(() => {});
     }
   }
 });
 
-client.once("ready", () => {
-  console.log(`✅ GG.Gamerz bot online as ${client.user.tag}`);
-});
+// ---------- SAFE LOGIN ----------
 
-client.login(process.env.DISCORD_TOKEN).catch(error => {
-  console.error("Bot login failed. Check Railway DISCORD_TOKEN:", error);
-});
+if (!process.env.DISCORD_TOKEN) {
+  console.error("Missing DISCORD_TOKEN in Railway Variables.");
+} else {
+  client.login(process.env.DISCORD_TOKEN).catch(error => {
+    console.error("Discord login failed:", error.message);
+  });
+}
