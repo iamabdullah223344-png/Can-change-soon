@@ -563,7 +563,7 @@ client.on("messageCreate", async (message) => {
 
     // ========== PART 5: TICKETS + VERIFICATION ==========
 
-    if (command === "ticketpanel") {
+  if (command === "ticketpanel") {
       if (!message.member.permissions.has(
         PermissionsBitField.Flags.ManageChannels
       )) {
@@ -581,7 +581,7 @@ client.on("messageCreate", async (message) => {
         embeds: [
           makeEmbed(
             "🎫・PREMIUM SUPPORT",
-            "Need help? Press the button below to open a private support ticket."
+            "Need help? Press **Create Ticket** to open a private support channel."
           )
         ],
         components: [row]
@@ -590,7 +590,7 @@ client.on("messageCreate", async (message) => {
 
     if (command === "close") {
       if (!message.channel.name.startsWith("ticket-")) {
-        return message.reply("❌ Use this command inside a ticket channel.");
+        return message.reply("❌ Use `$close` inside a ticket channel.");
       }
 
       if (!message.member.permissions.has(
@@ -599,7 +599,8 @@ client.on("messageCreate", async (message) => {
         return message.reply("❌ You need Manage Channels permission.");
       }
 
-      await message.reply("🔒 Closing this ticket in 3 seconds...");
+      await message.reply("🔒 Closing ticket in 3 seconds...");
+
       setTimeout(() => {
         message.channel.delete("Ticket closed").catch(console.error);
       }, 3000);
@@ -620,7 +621,7 @@ client.on("messageCreate", async (message) => {
 
       if (!verifiedRole) {
         return message.reply(
-          "❌ Create a role named `Verified` first, then run `$verifysetup` again."
+          "❌ Create a role named `Verified` first, then run `$verifysetup`."
         );
       }
 
@@ -634,8 +635,8 @@ client.on("messageCreate", async (message) => {
       return message.channel.send({
         embeds: [
           makeEmbed(
-            "🛡️・SERVER VERIFICATION",
-            "Press **Verify Me** to receive the Verified role and unlock the server."
+            "🛡️・MEMBER VERIFICATION",
+            "Press **Verify Me** to receive the Verified role."
           )
         ],
         components: [row]
