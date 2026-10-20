@@ -1,170 +1,100 @@
 
 const {
-  Client,
-  GatewayIntentBits,
-  PermissionsBitField,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ChannelType
+  Client, GatewayIntentBits, Partials,
+  EmbedBuilder, PermissionsBitField,
+  ChannelType, ActionRowBuilder, ButtonBuilder,
+  ButtonStyle
 } = require("discord.js");
-
-
-const PREFIX = "$";
-const GOLD = 0xD4AF37;
-
-if (!TOKEN) {
-  console.error("Missing DISCORD_TOKEN in Railway Variables.");
-  process.exit(1);
-}
+const fs = require("fs");
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ]
+    GatewayIntentBits.MessageContent
+  ],
+  partials: [Partials.Channel]
 });
 
-// These maps are temporary and reset after a restart.
-const giveaways = new Map();
-const tickets = new Map();
-const warnings = new Map();
+const PREFIX = "$";
+const GOLD = 0xD4AF37;
+const WARNINGS = new Map();
+const GIVEAWAYS = new Map();
+const economyFile = "./economy.json";
 
-const luxury = (title, description) =>
-  new EmbedBuilder()
+let economy = {};
+try {
+  economy = JSON.parse(fs.readFileSync(economyFile, "utf8"));
+} catch {
+  economy = {};
+}
+
+function saveEconomy() {
+  try {
+    fs.writeFileSync(economyFile, JSON.stringify(economy, null, 2));
+  } catch (error) {
+    console.error("Economy save error:", error);
+  }
+}
+
+function account(id) {
+  if (!economy[id]) {
+    economy[id] = { cash: 100, bank: 0, lastDaily: 0 };
+  }
+  return economy[id];
+}
+
+function gold(title, description = "") {
+  return new EmbedBuilder()
     .setColor(GOLD)
     .setTitle(`👑 ${title}`)
     .setDescription(description)
+    .setFooter({ text: "✦ GOLDEN LUXURY ✦" })
     .setTimestamp();
+}
 
-const has = (member, permission) =>
-  member.permissions.has(permission);
+async function reply(message, embed) {
+  return message.reply({ embeds: [embed] });
+}
 
 function durationMs(input) {
-  const match = /^(\d+)(m|h|d)$/i.exec(input || "");
+  const match = /^(\d+)(s|m|h|d)$/i.exec(input || "");
   if (!match) return null;
+  const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+  return Number(match[1]) * units[match[2].toLowerCase()];
+}
 
-  const n = Number(match[1]);
-  const unit = match[2].toLowerCase();
-  const ms = n * (
-    unit === "m" ? 60000 :
-    unit === "h" ? 3600000 : 86400000
-  );
-
-  return Number.isSafeInteger(ms) && n > 0 ? ms : null;
+function pickWinner(users) {
+  return users[Math.floor(Math.random() * users.length)];
 }
 
 client.once("ready", () => {
-  console.log(`👑 Online as ${client.user.tag}`);
-  console.log("🖤 Black & Gold commands loaded.");
+  console.log(`👑 ${client.user.tag} is online!`);
 });
+
+client.on("error", console.error);
 
 client.on("messageCreate", async message => {
   if (!message.guild || message.author.bot) return;
   if (!message.content.startsWith(PREFIX)) return;
 
-  const parts = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const cmd = (parts.shift() || "").toLowerCase();
-  const args = parts;
-  if (!cmd) return;
-
-  const ADMIN = PermissionsBitField.Flags.Administrator;
-  const MOD = PermissionsBitField.Flags.ModerateMembers;
-  const MANAGE_MESSAGES = PermissionsBitField.Flags.ManageMessages;
-  const MANAGE_CHANNELS = PermissionsBitField.Flags.ManageChannels;
+  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const cmd = (args.shift() || "").toLowerCase();
+  const target = message.mentions.members.first();
+  const member = message.member;
+  const guild = message.guild;
 
   try {
-    switch (cmd) {
-      case "help":
-        return message.reply({
-          embeds: [luxury("LUXURY COMMANDS", [
-            "**GENERAL**",
-            "`$ping` `$help` `$serverinfo` `$userinfo`",
-            "`$membercount` `$avatar` `$8ball` `$poll`",
-            "",
-            "**MODERATION**",
-            "`$ban @user reason` `$kick @user reason`",
-            "`$mute @user 10m` `$unmute @user`",
-            "`$warn @user reason` `$warnings @user`",
-            "`$purge 10` `$lock` `$unlock` `$slowmode 5`",
-            "",
-            "**GIVEAWAYS**",
-            "`$gstart 10m 1 Prize` `$gend ID` `$greroll ID`",
-            "",
-            "**TICKETS & VERIFICATION**",
-            "`$ticketpanel` `$close` `$verifysetup`"
-          ].join("\n"))]
-        });
-
-      case "ping":
-        return message.reply(`🏓 Pong! ${client.ws.ping}ms`);
-
-      case "serverinfo": {
-        const g = message.guild;
-        return message.reply({
-          embeds: [luxury("SERVER INFORMATION",
-            `**Name:** ${g.name}\n` +
-            `**Members:** ${g.memberCount}\n` +
-            `**Created:** <t:${Math.floor(g.createdTimestamp / 1000)}:D>`
-          )]
-        });
-      }
-
-      case "membercount":
-        return message.reply(
-          `👑 **${message.guild.name}** has **${message.guild.memberCount}** members.`
-        );
-
-      case "userinfo": {
-        const user = message.mentions.users.first() || message.author;
-        const member = await message.guild.members.fetch(user.id).catch(() => null);
-        return message.reply({
-          embeds: [luxury("USER PROFILE",
-            `**User:** ${user.tag}\n` +
-            `**ID:** ${user.id}\n` +
-            `**Joined:** ${member?.joinedTimestamp
-              ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:D>`
-              : "Unknown"}\n` +
-            `**Created:** <t:${Math.floor(user.createdTimestamp / 1000)}:D>`
-          ).setThumbnail(user.displayAvatarURL())]
-        });
-      }
-
-      case "avatar": {
-        const user = message.mentions.users.first() || message.author;
-        return message.reply(user.displayAvatarURL({ size: 1024 }));
-      }
-
-      case "8ball": {
-        if (!args.length) {
-          return message.reply("Ask a question! Example: `$8ball Will I win?`");
-        }
-        const answers = [
-          "Absolutely! 👑",
-          "The signs look good ✨",
-          "Maybe. Try again later.",
-          "Not looking likely.",
-          "Only time will tell."
-        ];
-        return message.reply(
-          `🎱 ${answers[Math.floor(Math.random() * answers.length)]}`
-        );
-      }
-
-      case "poll": {
-        if (!args.length) {
-          return message.reply("Usage: `$poll Should we host an event?`");
-        }
-        const poll = await message.channel.send({
-          embeds: [luxury("COMMUNITY POLL", args.join(" "))]
-        });
-        await poll.react("👍");
-        await poll.react("👎");
-        return;
+    // PART 2 COMMANDS GO HERE
+  } catch (error) {
+    console.error(`Command ${cmd} failed:`, error);
+    await message.reply("⚠️ This command failed. Check the bot logs and permissions.")
+      .catch(() => {});
   }
+});
 
-    
-client.login(process.env.DISCORD_TOKEN);
+// PART 3 INTERACTIONS GO HERE
+
+client.login(process.env.TOKEN);
+      
