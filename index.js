@@ -69,7 +69,7 @@ function pickWinner(users) {
   return users[Math.floor(Math.random() * users.length)];
 }
 
-client.once("ready", () => {
+client.once("clientReady", () => {
   console.log(`👑 ${client.user.tag} is online!`);
 });
 
