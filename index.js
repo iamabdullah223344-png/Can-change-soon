@@ -10,7 +10,7 @@ const {
   ChannelType
 } = require("discord.js");
 
-const TOKEN = process.env.DISCORD_TOKEN;
+
 const PREFIX = "$";
 const GOLD = 0xD4AF37;
 
