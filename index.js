@@ -452,4 +452,5 @@ module.exports = function registerPremiumCommands(client) {
 
   console.log("👑 Black & Gold premium commands loaded.");
 };
+client.login(process.env.DISCORD_TOKEN);
             
