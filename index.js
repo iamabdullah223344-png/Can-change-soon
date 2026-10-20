@@ -1,541 +1,898 @@
 
 const {
-  Client, GatewayIntentBits, Partials, EmbedBuilder,
-  PermissionsBitField, ChannelType, ActionRowBuilder,
-  ButtonBuilder, ButtonStyle, Events
+  Client,
+  GatewayIntentBits,
+  Partials,
+  PermissionsBitField,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelType
 } = require("discord.js");
 
-const TOKEN = process.env.TOKEN;
-const PREFIX = "$";
-
-if (!TOKEN) {
-  console.error("Missing TOKEN environment variable!");
-  process.exit(1);
-}
+const fs = require("fs");
+const path = require("path");
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildModeration
   ],
   partials: [Partials.Channel]
 });
 
-const giveaways = new Map();
-const warnings = new Map();
-const tickets = new Set();
-const color = 0x8b5cf6;
+const PREFIX = "$";
+const DATA_DIR = path.join(__dirname, "data");
 
-const embed = (title, description) =>
-  new EmbedBuilder().setColor(color).setTitle(title)
-    .setDescription(description).setTimestamp();
-
-function duration(text) {
-  const match = /^(\d+)(s|m|h|d)$/i.exec(text || "");
-  if (!match) return null;
-  const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
-  const ms = Number(match[1]) * units[match[2].toLowerCase()];
-  return ms >= 1000 && ms <= 30 * 86400000 ? ms : null;
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-client.once(Events.ClientReady, c =>
-  console.log(`Bot online as ${c.user.tag}`)
-);
+function loadData(name) {
+  const file = path.join(DATA_DIR, `${name}.json`);
 
-client.on(Events.MessageCreate, async message => {
-  try {
-    if (!message.guild || message.author.bot) return;
-    const content = message.content.trim();
-    if (!content.startsWith(PREFIX)) return;
-
-    const parts = content.slice(1).trim().split(/\s+/);
-    const cmd = (parts.shift() || "").toLowerCase();
-    const args = parts;
-    const member = message.mentions.members.first();
-
-    if (cmd === "ping")
-      return message.reply(`🏓 Pong! ${client.ws.ping}ms`);
-
-    if (cmd === "help")
-      return message.channel.send({ embeds: [embed("📚 Commands",
-        "**General**\n`$ping` `$help` `$serverinfo` `$userinfo` `$membercount` `$avatar` `$8ball` `$poll`\n\n" +
-        "**Moderation**\n`$ban` `$kick` `$mute` `$warn` `$warnings` `$purge` `$lock` `$unlock` `$slowmode`\n\n" +
-        "**Giveaways**\n`$gstart` `$gend` `$greroll`\n\n" +
-        "**Tickets & Verification**\n`$ticketpanel` `$close` `$verifysetup`")] });
-
-    if (cmd === "serverinfo") {
-      const g = message.guild;
-      return message.channel.send({ embeds: [
-        embed(`📊 ${g.name}`,
-          `**Members:** ${g.memberCount}\n**Channels:** ${g.channels.cache.size}\n**Roles:** ${g.roles.cache.size}\n**Created:** <t:${Math.floor(g.createdTimestamp / 1000)}:D>`)
-          .setThumbnail(g.iconURL())
-      ] });
-    }
-
-    if (cmd === "userinfo") {
-      const user = message.mentions.users.first() || message.author;
-      const m = await message.guild.members.fetch(user.id).catch(() => null);
-      return message.channel.send({ embeds: [
-        embed(`👤 ${user.tag}`,
-          `**ID:** ${user.id}\n**Account created:** <t:${Math.floor(user.createdTimestamp / 1000)}:D>\n**Joined:** ${m ? `<t:${Math.floor(m.joinedTimestamp / 1000)}:D>` : "Unknown"}`)
-          .setThumbnail(user.displayAvatarURL())
-      ] });
-    }
-
-    if (cmd === "membercount")
-      return message.reply(`👥 Members: **${message.guild.memberCount}**`);
-
-    if (cmd === "avatar") {
-      const user = message.mentions.users.first() || message.author;
-      return message.channel.send({ embeds: [
-        embed(`${user.username}'s Avatar`, "").setImage(user.displayAvatarURL({ size: 1024 }))
-      ] });
-    }
-
-    if (cmd === "8ball") {
-      if (!args.length) return message.reply("Ask a question after `$8ball`.");
-      const answers = ["It is certain!", "Probably yes.", "Ask again later.", "Signs point to yes.", "Very doubtful.", "Cannot predict right now."];
-      return message.reply(`🎱 ${answers[Math.floor(Math.random() * answers.length)]}`);
-    }
-
-    if (cmd === "poll") {
-      const bits = args.join(" ").split("|").map(x => x.trim()).filter(Boolean);
-      if (bits.length < 3) return message.reply("Use: `$poll Question | Option 1 | Option 2`");
-      if (bits.length > 11) return message.reply("Maximum 10 options.");
-      const emojis = ["🇦","🇧","🇨","🇩","🇪","🇫","🇬","🇭","🇮","🇯"];
-      const p = await message.channel.send({ embeds: [
-        embed(`📊 ${bits[0]}`, bits.slice(1).map((x,i) => `${emojis[i]} ${x}`).join("\n"))
-      ] });
-      for (let i = 1; i < bits.length; i++) await p.react(emojis[i-1]).catch(() => {});
-      return;
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, "{}");
   }
 
-  
-    // MODERATION COMMANDS
-    const modPerms = {
-      ban: PermissionsBitField.Flags.BanMembers,
-      kick: PermissionsBitField.Flags.KickMembers,
-      mute: PermissionsBitField.Flags.ModerateMembers,
-      warn: PermissionsBitField.Flags.ModerateMembers,
-      warnings: PermissionsBitField.Flags.ModerateMembers,
-      purge: PermissionsBitField.Flags.ManageMessages,
-      lock: PermissionsBitField.Flags.ManageChannels,
-      unlock: PermissionsBitField.Flags.ManageChannels,
-      slowmode: PermissionsBitField.Flags.ManageChannels
-    };
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    console.error(`Could not load ${name}:`, error);
+    return {};
+  }
+}
 
-    if (modPerms[cmd]) {
-      if (!message.member.permissions.has(modPerms[cmd]))
-        return message.reply("❌ You don't have permission to use this command.");
+function saveData(name, data) {
+  fs.writeFileSync(
+    path.join(DATA_DIR, `${name}.json`),
+    JSON.stringify(data, null, 2)
+  );
+}
 
-      if (cmd === "ban" || cmd === "kick") {
-        if (!member) return message.reply(`Use: \`$${cmd} @user [reason]\``);
-        if (member.id === message.author.id)
-          return message.reply("You cannot moderate yourself.");
-        if (!member.moderatable)
-          return message.reply("I can't moderate that member. Check role hierarchy.");
-        const reason = args.slice(1).join(" ") || "No reason provided";
-        if (cmd === "ban") {
-          await member.ban({ reason });
-          return message.channel.send(`🔨 Banned ${member.user.tag}. Reason: ${reason}`);
-        }
-        await member.kick(reason);
-        return message.channel.send(`👢 Kicked ${member.user.tag}. Reason: ${reason}`);
+const warnings = loadData("warnings");
+const economy = loadData("economy");
+const giveaways = loadData("giveaways");
+const tickets = loadData("tickets");
+
+function makeEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setTitle(title)
+    .setDescription(description)
+    .setTimestamp();
+}
+
+function getMember(message, input) {
+  return (
+    message.mentions.members.first() ||
+    message.guild.members.cache.get(input)
+  );
+}
+
+client.once("ready", () => {
+  console.log(`✅ Bot online as ${client.user.tag}`);
+  client.user.setActivity("$help | Premium Bot");
+});
+
+client.on("messageCreate", async (message) => {
+  if (!message.guild || message.author.bot) return;
+  if (!message.content.startsWith(PREFIX)) return;
+
+  const args = message.content
+    .slice(PREFIX.length)
+    .trim()
+    .split(/\s+/);
+
+  const command = (args.shift() || "").toLowerCase();
+
+  if (!command) return;
+
+  try {
+    // PART 2: GENERAL COMMANDS GO HERE
+
+    // ========== PART 2: GENERAL COMMANDS ==========
+
+    if (command === "ping") {
+      return message.reply(`🏓 Pong! **${client.ws.ping}ms**`);
+    }
+
+    if (command === "help") {
+      return message.reply({
+        embeds: [
+          makeEmbed(
+            "✦ PREMIUM BOT COMMANDS",
+            "**GENERAL**\n" +
+            "`$ping` `$help` `$serverinfo` `$userinfo` `$membercount` `$avatar` `$8ball` `$poll`\n\n" +
+            "**MODERATION**\n" +
+            "`$ban` `$kick` `$mute` `$warn` `$warnings` `$purge` `$lock` `$unlock` `$slowmode`\n\n" +
+            "**GIVEAWAYS**\n" +
+            "`$gstart` `$gend` `$greroll`\n\n" +
+            "**TICKETS & VERIFICATION**\n" +
+            "`$ticketpanel` `$close` `$verifysetup`\n\n" +
+            "**OWO-STYLE ECONOMY**\n" +
+            "`$hunt` `$battle` `$daily` `$balance` `$leaderboard` `$coinflip` `$bj` `$work` `$beg` `$sell` `$inventory`"
+          )
+        ]
+      });
+    }
+
+    if (command === "serverinfo") {
+      const g = message.guild;
+      const e = makeEmbed(
+        `✦ ${g.name}`,
+        `**Owner:** <@${g.ownerId}>\n` +
+        `**Members:** ${g.memberCount}\n` +
+        `**Channels:** ${g.channels.cache.size}\n` +
+        `**Roles:** ${g.roles.cache.size}\n` +
+        `**Created:** <t:${Math.floor(g.createdTimestamp / 1000)}:D>`
+      );
+
+      if (g.iconURL()) {
+        e.setThumbnail(g.iconURL({ size: 256 }));
       }
 
-      if (cmd === "mute") {
-        const time = args.find(x => /^\d+[smhd]$/i.test(x));
-        const ms = duration(time);
-        if (!member || !ms)
-          return message.reply("Use: `$mute @user 10m` (max 30 days).");
-        if (!member.moderatable)
-          return message.reply("I can't timeout that member. Check role hierarchy.");
-        await member.timeout(ms, args.slice(1).join(" ") || "Moderator timeout");
-        return message.channel.send(`🔇 Timed out ${member.user.tag} for ${time}.`);
-      }
+      return message.reply({ embeds: [e] });
+    }
 
-      if (cmd === "warn") {
-        if (!member) return message.reply("Use: `$warn @user [reason]`");
-        const key = `${message.guild.id}:${member.id}`;
-        const list = warnings.get(key) || [];
-        const reason = args.slice(1).join(" ") || "No reason given";
-        list.push({ reason, moderator: message.author.tag });
-        warnings.set(key, list);
-        return message.channel.send(`⚠️ Warned ${member.user.tag}: ${reason}`);
-      }
+    if (command === "userinfo") {
+      const member = getMember(message, args[0]) || message.member;
+      const u = member.user;
 
-      if (cmd === "warnings") {
-        if (!member) return message.reply("Use: `$warnings @user`");
-        const list = warnings.get(`${message.guild.id}:${member.id}`) || [];
-        return message.channel.send({ embeds: [
-          embed(`⚠️ Warnings: ${member.user.tag}`,
-            list.length ? list.map((w,i) =>
-              `**${i+1}.** ${w.reason} — ${w.moderator}`).join("\n")
-              : "No warnings recorded this session.")
-        ] });
-      }
+      const e = makeEmbed(
+        `✦ ${u.username}`,
+        `**User ID:** ${u.id}\n` +
+        `**Joined:** ${
+          member.joinedTimestamp
+            ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>`
+            : "Unknown"
+        }\n` +
+        `**Account created:** <t:${Math.floor(u.createdTimestamp / 1000)}:D>\n` +
+        `**Bot:** ${u.bot ? "Yes" : "No"}`
+      );
 
-      if (cmd === "purge") {
-        const n = Number(args[0]);
-        if (!Number.isInteger(n) || n < 1 || n > 100)
-          return message.reply("Use: `$purge 1-100`");
-        const deleted = await message.channel.bulkDelete(n, true);
-        const reply = await message.channel.send(`🧹 Deleted ${deleted.size} messages.`);
-        setTimeout(() => reply.delete().catch(() => {}), 4000);
-        return;
-      }
+      e.setThumbnail(u.displayAvatarURL({ size: 512 }));
+      return message.reply({ embeds: [e] });
+    }
 
-      if (cmd === "lock" || cmd === "unlock") {
-        const channel = message.mentions.channels.first() || message.channel;
-        await channel.permissionOverwrites.edit(message.guild.roles.everyone, {
-          SendMessages: cmd === "unlock" ? null : false
-        });
-        return message.channel.send(
-          cmd === "lock" ? `🔒 Locked ${channel}.` : `🔓 Unlocked ${channel}.`
+    if (command === "membercount") {
+      return message.reply(
+        `👥 This server has **${message.guild.memberCount} members**.`
+      );
+    }
+
+    if (command === "avatar") {
+      const member = getMember(message, args[0]);
+      const user =
+        member?.user ||
+        message.mentions.users.first() ||
+        message.author;
+
+      const url = user.displayAvatarURL({
+        size: 1024,
+        extension: "png"
+      });
+
+      const e = makeEmbed(
+        `✦ ${user.username}'s Avatar`,
+        `[Open Full Avatar](${url})`
+      );
+
+      e.setImage(url);
+      return message.reply({ embeds: [e] });
+    }
+
+    if (command === "8ball") {
+      if (!args.length) {
+        return message.reply(
+          "🎱 Ask a question! Example: `$8ball Will I win?`"
         );
       }
 
-      if (cmd === "slowmode") {
-        const seconds = Number(args[0]);
-        if (!Number.isInteger(seconds) || seconds < 0 || seconds > 21600)
-          return message.reply("Use: `$slowmode 0-21600` seconds.");
-        await message.channel.setRateLimitPerUser(seconds);
-        return message.channel.send(`⏱️ Slowmode: ${seconds} seconds.`);
-      }
-                                                  }
-      
-    // GIVEAWAY COMMANDS
-    if (cmd === "gstart") {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
-        return message.reply("❌ You need Manage Server permission.");
+      const answers = [
+        "Absolutely! ✨",
+        "It looks likely. 🌟",
+        "The signs point to yes. 👑",
+        "Ask again later. 🔮",
+        "Very doubtful. 🌙",
+        "Definitely not. 🖤",
+        "Only time will tell. 💫"
+      ];
 
-      const ms = duration(args[0]);
+      const answer = answers[
+        Math.floor(Math.random() * answers.length)
+      ];
+
+      return message.reply(`🎱 **${answer}**`);
+    }
+
+    if (command === "poll") {
+      const question = args.join(" ");
+
+      if (!question) {
+        return message.reply(
+          "📊 Usage: `$poll Should we host an event?`"
+        );
+      }
+
+      const poll = await message.channel.send({
+        embeds: [
+          makeEmbed(
+            "📊 COMMUNITY POLL",
+            `**${question}**\n\n👍 = Yes\n👎 = No`
+          )
+        ]
+      });
+
+      await poll.react("👍");
+      await poll.react("👎");
+      return;
+}
+    
+    // PART 3: MODERATION COMMANDS GO HERE
+
+    // ========== PART 3: MODERATION COMMANDS ==========
+
+    if (command === "ban") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers))
+        return message.reply("❌ You need **Ban Members** permission.");
+
+      const member = getMember(message, args[0]);
+      if (!member)
+        return message.reply("Usage: `$ban @user [reason]`");
+
+      if (!member.bannable)
+        return message.reply("❌ I cannot ban that member. Check role hierarchy.");
+
+      const reason = args.slice(1).join(" ") || "No reason provided";
+      await member.ban({ reason });
+
+      return message.reply(`🔨 Banned **${member.user.tag}**. Reason: ${reason}`);
+    }
+
+    if (command === "kick") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers))
+        return message.reply("❌ You need **Kick Members** permission.");
+
+      const member = getMember(message, args[0]);
+      if (!member)
+        return message.reply("Usage: `$kick @user [reason]`");
+
+      if (!member.kickable)
+        return message.reply("❌ I cannot kick that member. Check role hierarchy.");
+
+      const reason = args.slice(1).join(" ") || "No reason provided";
+      await member.kick(reason);
+
+      return message.reply(`👢 Kicked **${member.user.tag}**. Reason: ${reason}`);
+    }
+
+    if (command === "mute") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers))
+        return message.reply("❌ You need **Moderate Members** permission.");
+
+      const member = getMember(message, args[0]);
+      if (!member)
+        return message.reply("Usage: `$mute @user 10m [reason]`");
+
+      const match = (args[1] || "10m").match(/^(\d+)(s|m|h|d)$/i);
+      if (!match)
+        return message.reply("❌ Use a duration like `10m`, `2h`, or `1d`.");
+
+      const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+      const duration = Number(match[1]) * units[match[2].toLowerCase()];
+
+      if (duration < 1000 || duration > 28 * 86400000)
+        return message.reply("❌ Duration must be between 1 second and 28 days.");
+
+      if (!member.moderatable)
+        return message.reply("❌ I cannot timeout this member.");
+
+      await member.timeout(
+        duration,
+        args.slice(2).join(" ") || "Moderator action"
+      );
+
+      return message.reply(`🔇 Timed out **${member.user.tag}**.`);
+    }
+
+    if (command === "warn") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages))
+        return message.reply("❌ You need **Manage Messages** permission.");
+
+      const member = getMember(message, args[0]);
+      if (!member)
+        return message.reply("Usage: `$warn @user [reason]`");
+
+      const key = `${message.guild.id}:${member.id}`;
+      warnings[key] ||= [];
+
+      const reason = args.slice(1).join(" ") || "No reason provided";
+
+      warnings[key].push({
+        reason,
+        moderator: message.author.id,
+        date: Date.now()
+      });
+
+      saveData("warnings", warnings);
+
+      return message.reply(
+        `⚠️ Warned **${member.user.tag}**. Reason: ${reason}`
+      );
+    }
+
+    if (command === "warnings") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages))
+        return message.reply("❌ You need **Manage Messages** permission.");
+
+      const member = getMember(message, args[0]);
+      if (!member)
+        return message.reply("Usage: `$warnings @user`");
+
+      const list = warnings[`${message.guild.id}:${member.id}`] || [];
+
+      const description = list.length
+        ? list.map((w, i) =>
+            `**${i + 1}.** ${w.reason} — <@${w.moderator}>`
+          ).join("\n")
+        : "No warnings found.";
+
+      return message.reply({
+        embeds: [
+          makeEmbed(`⚠️ Warnings for ${member.user.username}`, description)
+        ]
+      });
+    }
+
+    if (command === "purge") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages))
+        return message.reply("❌ You need **Manage Messages** permission.");
+
+      const amount = Number(args[0]);
+
+      if (!Number.isInteger(amount) || amount < 1 || amount > 100)
+        return message.reply("Usage: `$purge 1-100`");
+
+      const deleted = await message.channel.bulkDelete(amount + 1, true);
+
+      const notice = await message.channel.send(
+        `🧹 Deleted ${Math.max(0, deleted.size - 1)} messages.`
+      );
+
+      setTimeout(() => notice.delete().catch(() => {}), 4000);
+      return;
+    }
+
+    if (command === "lock" || command === "unlock") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
+        return message.reply("❌ You need **Manage Channels** permission.");
+
+      await message.channel.permissionOverwrites.edit(
+        message.guild.roles.everyone,
+        { SendMessages: command === "lock" ? false : null }
+      );
+
+      return message.reply(
+        command === "lock" ? "🔒 Channel locked." : "🔓 Channel unlocked."
+      );
+    }
+
+    if (command === "slowmode") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
+        return message.reply("❌ You need **Manage Channels** permission.");
+
+      const seconds = Number(args[0]);
+
+      if (!Number.isInteger(seconds) || seconds < 0 || seconds > 21600)
+        return message.reply("Usage: `$slowmode 0-21600`");
+
+      await message.channel.setRateLimitPerUser(seconds);
+
+      return message.reply(`⏱️ Slowmode set to **${seconds} seconds**.`);
+  }
+    
+    // PART 4: GIVEAWAY COMMANDS GO HERE
+
+    // ========== PART 4: GIVEAWAY COMMANDS ==========
+
+    if (command === "gstart") {
+      if (!message.member.permissions.has(
+        PermissionsBitField.Flags.ManageMessages
+      )) {
+        return message.reply("❌ You need Manage Messages permission.");
+      }
+
+      const match = (args[0] || "").match(/^(\d+)(s|m|h|d)$/i);
       const winnersCount = Number(args[1]);
       const prize = args.slice(2).join(" ");
 
-      if (!ms || !Number.isInteger(winnersCount) ||
-          winnersCount < 1 || winnersCount > 10 || !prize) {
-        return message.reply("Use: `$gstart 1h 1 Nitro`");
+      if (!match || !Number.isInteger(winnersCount) ||
+          winnersCount < 1 || winnersCount > 20 || !prize) {
+        return message.reply(
+          "🎉 Usage: `$gstart 1h 1 Nitro`\n" +
+          "Format: duration, winner count, prize."
+        );
       }
 
-      const giveawayEmbed = embed(
-        "🎉 GIVEAWAY",
-        `**Prize:** ${prize}\n**Hosted by:** ${message.author}\n` +
-        `**Winners:** ${winnersCount}\n` +
-        `**Ends:** <t:${Math.floor((Date.now()+ms)/1000)}:R>\n\nReact with 🎉 to enter!`
-      );
+      const units = {
+        s: 1000,
+        m: 60000,
+        h: 3600000,
+        d: 86400000
+      };
+
+      const duration =
+        Number(match[1]) * units[match[2].toLowerCase()];
+
+      if (duration < 10000 || duration > 30 * 86400000) {
+        return message.reply(
+          "❌ Duration must be between 10 seconds and 30 days."
+        );
+      }
+
+      const endAt = Date.now() + duration;
 
       const giveawayMessage = await message.channel.send({
-        embeds: [giveawayEmbed]
+        embeds: [
+          makeEmbed(
+            "🎉 PREMIUM GIVEAWAY",
+            `**Prize:** ${prize}\n` +
+            `**Winners:** ${winnersCount}\n` +
+            `**Hosted by:** ${message.author}\n` +
+            `**Ends:** <t:${Math.floor(endAt / 1000)}:R>\n\n` +
+            "React with 🎉 to enter!"
+          )
+        ]
       });
 
       await giveawayMessage.react("🎉");
-      giveaways.set(giveawayMessage.id, {
+
+      giveaways[giveawayMessage.id] = {
+        guildId: message.guild.id,
         channelId: message.channel.id,
         prize,
         winnersCount,
-        ended: false
-      });
+        endAt,
+        ended: false,
+        hostId: message.author.id
+      };
 
-      setTimeout(async () => {
-        const data = giveaways.get(giveawayMessage.id);
-        if (!data || data.ended) return;
-        data.ended = true;
+      saveData("giveaways", giveaways);
 
-        const reaction = giveawayMessage.reactions.cache.get("🎉");
-        const users = reaction
-          ? await reaction.users.fetch().catch(() => null)
-          : null;
-        const entrants = users
-          ? [...users.values()].filter(u => !u.bot)
-          : [];
-
-        const picked = [];
-        while (entrants.length && picked.length < data.winnersCount) {
-          picked.push(entrants.splice(
-            Math.floor(Math.random() * entrants.length), 1
-          )[0]);
-        }
-
-        await giveawayMessage.reply({
-          embeds: [embed(
-            "🎉 GIVEAWAY ENDED",
-            `**Prize:** ${data.prize}\n` +
-            (picked.length
-              ? `**Winner(s):** ${picked.join(", ")}`
-              : "No valid entries.")
-          )]
-        }).catch(() => {});
-      }, ms);
-
-      return message.reply(`🎉 Giveaway started! ID: \`${giveawayMessage.id}\``);
-    }
-
-    if (cmd === "gend") {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
-        return message.reply("❌ You need Manage Server permission.");
-
-      const data = giveaways.get(args[0]);
-      if (!data || data.ended)
-        return message.reply("Giveaway not found or already ended. Use `$gend MESSAGE_ID`.");
-
-      data.ended = true;
-      const channel = await client.channels.fetch(data.channelId).catch(() => null);
-      const giveawayMessage = channel
-        ? await channel.messages.fetch(args[0]).catch(() => null)
-        : null;
-
-      if (!giveawayMessage) return message.reply("I couldn't find that giveaway message.");
-
-      const reaction = giveawayMessage.reactions.cache.get("🎉");
-      const users = reaction ? await reaction.users.fetch().catch(() => null) : null;
-      const entrants = users ? [...users.values()].filter(u => !u.bot) : [];
-      const picked = [];
-
-      while (entrants.length && picked.length < data.winnersCount) {
-        picked.push(entrants.splice(
-          Math.floor(Math.random() * entrants.length), 1
-        )[0]);
-      }
-
-      return channel.send(
-        picked.length
-          ? `🎉 Winner(s) of **${data.prize}**: ${picked.join(", ")}`
-          : `No valid entries for **${data.prize}**.`
+      return message.reply(
+        `✅ Giveaway created! Message ID: \`${giveawayMessage.id}\``
       );
     }
 
-    if (cmd === "greroll") {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
-        return message.reply("❌ You need Manage Server permission.");
+    if (command === "gend" || command === "greroll") {
+      if (!message.member.permissions.has(
+        PermissionsBitField.Flags.ManageMessages
+      )) {
+        return message.reply("❌ You need Manage Messages permission.");
+      }
 
-      const data = giveaways.get(args[0]);
-      if (!data || !data.ended)
-        return message.reply("Use `$greroll MESSAGE_ID` for an ended giveaway from this session.");
+      const giveawayId = args[0];
+      const data = giveaways[giveawayId];
 
-      const channel = await client.channels.fetch(data.channelId).catch(() => null);
-      const giveawayMessage = channel
-        ? await channel.messages.fetch(args[0]).catch(() => null)
-        : null;
-      if (!giveawayMessage) return message.reply("Giveaway message not found.");
+      if (!data || data.guildId !== message.guild.id) {
+        return message.reply(
+          "❌ Giveaway not found. Usage: `$gend MESSAGE_ID`"
+        );
+      }
+
+      if (command === "gend" && data.ended) {
+        return message.reply("❌ This giveaway has already ended.");
+      }
+
+      if (command === "greroll" && !data.ended) {
+        return message.reply(
+          "❌ End the giveaway first using `$gend MESSAGE_ID`."
+        );
+      }
+
+      const channel = message.guild.channels.cache.get(data.channelId);
+
+      if (!channel || !channel.isTextBased()) {
+        return message.reply("❌ Giveaway channel not found.");
+      }
+
+      const giveawayMessage = await channel.messages
+        .fetch(giveawayId)
+        .catch(() => null);
+
+      if (!giveawayMessage) {
+        return message.reply("❌ Giveaway message could not be found.");
+      }
 
       const reaction = giveawayMessage.reactions.cache.get("🎉");
-      const users = reaction ? await reaction.users.fetch().catch(() => null) : null;
-      const entrants = users ? [...users.values()].filter(u => !u.bot) : [];
-      if (!entrants.length) return message.reply("No eligible entrants.");
 
-      const winner = entrants[Math.floor(Math.random() * entrants.length)];
-      return channel.send(`🎉 New winner for **${data.prize}**: ${winner}!`);
-    }
+      const users = reaction
+        ? await reaction.users.fetch()
+        : new Map();
 
-    // TICKET PANEL
-    if (cmd === "ticketpanel") {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
+      const pool = [...users.values()].filter(user => !user.bot);
+
+      if (command === "gend") {
+        data.ended = true;
+        data.endedAt = Date.now();
+      }
+
+      const winners = [];
+
+      while (
+        pool.length > 0 &&
+        winners.length < (command === "gend" ? data.winnersCount : 1)
+      ) {
+        const index = Math.floor(Math.random() * pool.length);
+        winners.push(pool.splice(index, 1)[0]);
+      }
+
+      saveData("giveaways", giveaways);
+
+      if (command === "gend") {
+        const endedEmbed = makeEmbed(
+          "🎉 GIVEAWAY ENDED",
+          `**Prize:** ${data.prize}\n` +
+          `**Winner(s):** ${
+            winners.length
+              ? winners.map(user => `<@${user.id}>`).join(", ")
+              : "No valid entries"
+          }`
+        );
+
+        await giveawayMessage.edit({ embeds: [endedEmbed] });
+      }
+
+      if (winners.length === 0) {
+        return message.reply("😔 No eligible entrants were found.");
+      }
+
+      return message.reply(
+        `🎉 **${command === "greroll" ? "New winner" : "Winner(s)"}:** ` +
+        `${winners.map(user => `<@${user.id}>`).join(", ")}\n` +
+        `**Prize:** ${data.prize}`
+      );
+        }
+        
+    // PART 5: TICKET AND VERIFICATION COMMANDS GO HERE
+
+    // ========== PART 5: TICKETS + VERIFICATION ==========
+
+    if (command === "ticketpanel") {
+      if (!message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )) {
         return message.reply("❌ You need Manage Channels permission.");
+      }
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("ticket_create")
-          .setLabel("Create Ticket")
-          .setEmoji("🎫")
+          .setLabel("🎫 Create Ticket")
           .setStyle(ButtonStyle.Primary)
       );
 
       return message.channel.send({
-        embeds: [embed(
-          "🎫 Support Tickets",
-          "Press **Create Ticket** to open a private support channel."
-        )],
+        embeds: [
+          makeEmbed(
+            "🎫・PREMIUM SUPPORT",
+            "Need help? Press the button below to open a private support ticket."
+          )
+        ],
         components: [row]
       });
     }
 
-    if (cmd === "close") {
-      if (!message.channel.name.startsWith("ticket-"))
-        return message.reply("Use this command inside a ticket channel.");
+    if (command === "close") {
+      if (!message.channel.name.startsWith("ticket-")) {
+        return message.reply("❌ Use this command inside a ticket channel.");
+      }
 
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
-        return message.reply("❌ You need Manage Channels permission to close this ticket.");
+      if (!message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )) {
+        return message.reply("❌ You need Manage Channels permission.");
+      }
 
-      await message.reply("🔒 Closing ticket in 3 seconds...");
-      setTimeout(() =>
-        message.channel.delete("Ticket closed").catch(() => {}),
-        3000
-      );
+      await message.reply("🔒 Closing this ticket in 3 seconds...");
+      setTimeout(() => {
+        message.channel.delete("Ticket closed").catch(console.error);
+      }, 3000);
+
       return;
     }
 
-    // VERIFICATION PANEL
-    if (cmd === "verifysetup") {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageRoles))
+    if (command === "verifysetup") {
+      if (!message.member.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )) {
         return message.reply("❌ You need Manage Roles permission.");
+      }
+
+      const verifiedRole = message.guild.roles.cache.find(
+        role => role.name.toLowerCase() === "verified"
+      );
+
+      if (!verifiedRole) {
+        return message.reply(
+          "❌ Create a role named `Verified` first, then run `$verifysetup` again."
+        );
+      }
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("verify_member")
-          .setLabel("Verify")
-          .setEmoji("✅")
+          .setLabel("✅ Verify Me")
           .setStyle(ButtonStyle.Success)
       );
 
       return message.channel.send({
-        embeds: [embed(
-          "✅ Server Verification",
-          "Press **Verify** to receive the `Verified` role.\n" +
-          "Create a role named `Verified` first and put the bot's role above it."
-        )],
+        embeds: [
+          makeEmbed(
+            "🛡️・SERVER VERIFICATION",
+            "Press **Verify Me** to receive the Verified role and unlock the server."
+          )
+        ],
         components: [row]
       });
-        }
+    }
+    
+    // PART 6: OWO-STYLE ECONOMY COMMANDS GO HERE
 
+    // ========== PART 6: ECONOMY COMMANDS ==========
+
+    function getAccount(userId) {
+      if (!economy[userId]) {
+        economy[userId] = {
+          cash: 0,
+          bank: 0,
+          lastDaily: 0,
+          lastHunt: 0
+        };
+      }
+
+      return economy[userId];
+    }
+
+    function saveEconomy() {
+      saveData("economy", economy);
+    }
+
+    function randomInt(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    if (command === "balance" || command === "bal") {
+      const account = getAccount(message.author.id);
+
+      return message.reply({
+        embeds: [
+          makeEmbed(
+            "💰・YOUR WALLET",
+            `👤 **User:** ${message.author}\n` +
+            `💵 **Cash:** ${account.cash.toLocaleString()}\n` +
+            `🏦 **Bank:** ${account.bank.toLocaleString()}\n` +
+            `✨ **Total:** ${(account.cash + account.bank).toLocaleString()}`
+          )
+        ]
+      });
+    }
+
+    if (command === "daily") {
+      const account = getAccount(message.author.id);
+      const cooldown = 24 * 60 * 60 * 1000;
+      const remaining = cooldown - (Date.now() - account.lastDaily);
+
+      if (remaining > 0) {
+        const hours = Math.floor(remaining / 3600000);
+        const minutes = Math.floor((remaining % 3600000) / 60000);
+
+        return message.reply(
+          `⏳ Daily reward available in **${hours}h ${minutes}m**.`
+        );
+      }
+
+      const reward = randomInt(500, 1500);
+
+      account.cash += reward;
+      account.lastDaily = Date.now();
+      saveEconomy();
+
+      return message.reply(
+        `🎁 ${message.author}, you received **${reward.toLocaleString()} coins**!`
+      );
+    }
+
+    if (command === "hunt") {
+      const account = getAccount(message.author.id);
+      const cooldown = 30 * 1000;
+      const remaining = cooldown - (Date.now() - account.lastHunt);
+
+      if (remaining > 0) {
+        return message.reply(
+          `⏳ Hunt again in **${Math.ceil(remaining / 1000)} seconds**.`
+        );
+      }
+
+      account.lastHunt = Date.now();
+
+      const animals = [
+        "🐰 Rabbit",
+        "🦊 Fox",
+        "🐺 Wolf",
+        "🐻 Bear",
+        "🦌 Deer",
+        "🐉 Dragon"
+      ];
+
+      const animal = animals[randomInt(0, animals.length - 1)];
+      const reward = randomInt(100, 600);
+
+      account.cash += reward;
+      saveEconomy();
+
+      return message.reply(
+        `🏹 You hunted **${animal}** and earned **${reward} coins**!`
+      );
+    }
+
+    if (command === "battle") {
+      const target = message.mentions.users.first();
+
+      if (!target || target.bot || target.id === message.author.id) {
+        return message.reply(
+          "⚔️ Usage: `$battle @user` — mention another member."
+        );
+      }
+
+      const account = getAccount(message.author.id);
+      const opponent = getAccount(target.id);
+
+      const winnerIsYou = Math.random() < 0.5;
+      const winner = winnerIsYou ? account : opponent;
+      const loser = winnerIsYou ? opponent : account;
+      const prize = randomInt(100, 400);
+
+      if (winnerIsYou) {
+        winner.cash += prize;
+        loser.cash = Math.max(0, loser.cash - prize);
+      } else {
+        winner.cash += prize;
+        loser.cash = Math.max(0, loser.cash - prize);
+      }
+
+      saveEconomy();
+
+      return message.reply(
+        `⚔️ **Battle Results**\n` +
+        `${winnerIsYou ? message.author : target} wins!\n` +
+        `🏆 Prize: **${prize} coins**`
+      );
+    }
+
+    if (command === "leaderboard" || command === "lb") {
+      const ranking = Object.entries(economy)
+        .map(([id, data]) => ({
+          id,
+          total: (Number(data.cash) || 0) + (Number(data.bank) || 0)
+        }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 10);
+
+      if (ranking.length === 0) {
+        return message.reply("📊 No economy players yet. Try `$daily`!");
+      }
+
+      const lines = ranking.map((entry, index) =>
+        `**${index + 1}.** <@${entry.id}> — 💰 ${entry.total.toLocaleString()}`
+      );
+
+      return message.reply({
+        embeds: [
+          makeEmbed("🏆・RICH LIST", lines.join("\n"))
+        ]
+      });
+    }
+
+    if (command === "coinflip") {
+      const bet = Number(args[0]);
+      const choice = (args[1] || "").toLowerCase();
+
+      if (
+        !Number.isSafeInteger(bet) ||
+        bet < 1 ||
+        !["heads", "tails"].includes(choice)
+      ) {
+        return message.reply(
+          "🪙 Usage: `$coinflip 100 heads`\nChoose `heads` or `tails`."
+        );
+      }
+
+      const account = getAccount(message.author.id);
+
+      if (account.cash < bet) {
+        return message.reply("❌ You don't have enough cash for that bet.");
+      }
+
+      const result = Math.random() < 0.5 ? "heads" : "tails";
+      const won = result === choice;
+
+      account.cash += won ? bet : -bet;
+      saveEconomy();
+
+      return message.reply(
+        `🪙 It landed on **${result}**!\n` +
+        (won
+          ? `🎉 You won **${bet} coins**!`
+          : `😔 You lost **${bet} coins**.`)
+      );
+    }
+
+    if (command === "bj") {
+      const bet = Number(args[0]);
+
+      if (!Number.isSafeInteger(bet) || bet < 1) {
+        return message.reply("🃏 Usage: `$bj 100`");
+      }
+
+      const account = getAccount(message.author.id);
+
+      if (account.cash < bet) {
+        return message.reply("❌ You don't have enough cash.");
+      }
+
+      const player = randomInt(12, 21);
+      const dealer = randomInt(15, 21);
+
+      if (player > dealer) {
+        account.cash += bet;
+        saveEconomy();
+
+        return message.reply(
+          `🃏 You: **${player}** | Dealer: **${dealer}**\n` +
+          `🎉 You won **${bet} coins**!`
+        );
+      }
+
+      if (player === dealer) {
+        saveEconomy();
+
+        return message.reply(
+          `🃏 You: **${player}** | Dealer: **${dealer}**\n` +
+          "🤝 Draw! Your bet was returned."
+        );
+      }
+
+      account.cash -= bet;
+      saveEconomy();
+
+      return message.reply(
+        `🃏 You: **${player}** | Dealer: **${dealer}**\n` +
+        `😔 You lost **${bet} coins**.`
+      );
+        }
     
   } catch (error) {
-    console.error("Command error:", error);
+    console.error(`❌ Error in $${command}:`, error);
+
     await message.reply(
-      "⚠️ Command failed. Check my permissions and Railway logs."
+      "❌ Something went wrong. Please check the bot logs."
     ).catch(() => {});
   }
 });
 
-// BUTTON INTERACTIONS: TICKETS + VERIFICATION
-client.on(Events.InteractionCreate, async interaction => {
-  try {
-    if (!interaction.isButton() || !interaction.guild) return;
-
-    // CREATE PRIVATE TICKET
-    if (interaction.customId === "ticket_create") {
-      await interaction.deferReply({ ephemeral: true });
-
-      const existing = interaction.guild.channels.cache.find(
-        ch => ch.type === ChannelType.GuildText &&
-          ch.topic === `Ticket opener ID: ${interaction.user.id}`
-      );
-
-      if (existing)
-        return interaction.editReply(`You already have a ticket: ${existing}`);
-
-      const safeName = interaction.user.username
-        .toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 80) || "member";
-
-      const channel = await interaction.guild.channels.create({
-        name: `ticket-${safeName}`,
-        type: ChannelType.GuildText,
-        topic: `Ticket opener ID: ${interaction.user.id}`,
-        permissionOverwrites: [
-          {
-            id: interaction.guild.roles.everyone.id,
-            deny: [PermissionsBitField.Flags.ViewChannel]
-          },
-          {
-            id: interaction.user.id,
-            allow: [
-              PermissionsBitField.Flags.ViewChannel,
-              PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory
-            ]
-          },
-          {
-            id: client.user.id,
-            allow: [
-              PermissionsBitField.Flags.ViewChannel,
-              PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ManageChannels,
-              PermissionsBitField.Flags.ReadMessageHistory
-            ]
-          }
-        ]
-      });
-
-      const closeRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("ticket_close_button")
-          .setLabel("Close Ticket")
-          .setEmoji("🔒")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      await channel.send({
-        content: `${interaction.user} welcome! Please explain your issue.`,
-        components: [closeRow]
-      });
-
-      return interaction.editReply(`✅ Ticket created: ${channel}`);
+// Keep your bot token secret.
+// Add TOKEN as an environment variable in Railway.
+if (!process.env.TOKEN) {
+  console.error("❌ Missing TOKEN environment variable in Railway.");
+} else {
+  client.login(process.env.TOKEN).catch((error) => {
+    console.error("❌ Discord login failed:", error);
+  });
     }
-
-    // CLOSE TICKET BUTTON
-    if (interaction.customId === "ticket_close_button") {
-      const isOpener =
-        interaction.channel?.topic ===
-        `Ticket opener ID: ${interaction.user.id}`;
-
-      const isModerator =
-        interaction.memberPermissions?.has(
-          PermissionsBitField.Flags.ManageChannels
-        );
-
-      if (!isOpener && !isModerator) {
-        return interaction.reply({
-          content: "❌ Only the ticket opener or a moderator can close this ticket.",
-          ephemeral: true
-        });
-      }
-
-      await interaction.reply("🔒 Closing ticket in 3 seconds...");
-      setTimeout(() => {
-        interaction.channel?.delete("Ticket closed").catch(() => {});
-      }, 3000);
-      return;
-    }
-
-    // VERIFICATION BUTTON
-    if (interaction.customId === "verify_member") {
-      const role = interaction.guild.roles.cache.find(
-        r => r.name.toLowerCase() === "verified"
-      );
-
-      if (!role) {
-        return interaction.reply({
-          content: "❌ Create a role named `Verified` first.",
-          ephemeral: true
-        });
-      }
-
-      const botMember = interaction.guild.members.me;
-
-      if (
-        !botMember.permissions.has(PermissionsBitField.Flags.ManageRoles) ||
-        role.position >= botMember.roles.highest.position
-      ) {
-        return interaction.reply({
-          content: "❌ Give the bot Manage Roles permission and move its role above Verified.",
-          ephemeral: true
-        });
-      }
-
-      const member = await interaction.guild.members.fetch(interaction.user.id);
-      await member.roles.add(role);
-
-      return interaction.reply({
-        content: "✅ You are now verified!",
-        ephemeral: true
-      });
-    }
-  } catch (error) {
-    console.error("Button error:", error);
-
-    if (interaction.isRepliable() &&
-        !interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: "⚠️ Something failed. Check bot permissions and Railway logs.",
-        ephemeral: true
-      }).catch(() => {});
-    }
-  }
-});
-
-// START BOT
-client.login(TOKEN);
-
-      
+    
