@@ -105,7 +105,7 @@ client.on("messageCreate", async (message) => {
       return message.reply({
         embeds: [
           makeEmbed(
-            "✦ PREMIUM BOT COMMANDS",
+            "✦ CHILLING HANGOUT BOT COMMANDS",
             "**GENERAL**\n" +
             "`$ping` `$help` `$serverinfo` `$userinfo` `$membercount` `$avatar` `$8ball` `$poll`\n\n" +
             "**MODERATION**\n" +
@@ -561,87 +561,79 @@ client.on("messageCreate", async (message) => {
         
     // PART 5: TICKET AND VERIFICATION COMMANDS GO HERE
 
-    // ========== PART 5: TICKETS + VERIFICATION ==========
-
-  if (command === "ticketpanel") {
-      if (!message.member.permissions.has(
-        PermissionsBitField.Flags.ManageChannels
-      )) {
-        return message.reply("❌ You need Manage Channels permission.");
-      }
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("ticket_create")
-          .setLabel("🎫 Create Ticket")
-          .setStyle(ButtonStyle.Primary)
-      );
-
-      return message.channel.send({
-        embeds: [
-          makeEmbed(
-            "🎫・PREMIUM SUPPORT",
-            "Need help? Press **Create Ticket** to open a private support channel."
-          )
-        ],
-        components: [row]
-      });
-    }
-
-    if (command === "close") {
-      if (!message.channel.name.startsWith("ticket-")) {
-        return message.reply("❌ Use `$close` inside a ticket channel.");
-      }
-
-      if (!message.member.permissions.has(
-        PermissionsBitField.Flags.ManageChannels
-      )) {
-        return message.reply("❌ You need Manage Channels permission.");
-      }
-
-      await message.reply("🔒 Closing ticket in 3 seconds...");
-
-      setTimeout(() => {
-        message.channel.delete("Ticket closed").catch(console.error);
-      }, 3000);
-
-      return;
-    }
-
-    if (command === "verifysetup") {
-      if (!message.member.permissions.has(
-        PermissionsBitField.Flags.ManageRoles
-      )) {
+// $verifypanel @Verified
+    if (command === "verifypanel") {
+      if (!message.member.permissions.has("ManageRoles")) {
         return message.reply("❌ You need Manage Roles permission.");
       }
 
-      const verifiedRole = message.guild.roles.cache.find(
-        role => role.name.toLowerCase() === "verified"
-      );
+      const role = message.mentions.roles.first();
 
-      if (!verifiedRole) {
-        return message.reply(
-          "❌ Create a role named `Verified` first, then run `$verifysetup`."
-        );
+      if (!role) {
+        return message.reply("❌ Usage: `$verifypanel @Verified`");
       }
+
+      const embed = makeEmbed(
+        "🔐 CHILLING HANGOUT | VERIFICATION",
+        `Welcome to **Chilling Hangout**!\n\n` +
+        `**Verification Role:** <@&${role.id}>\n\n` +
+        "Click below to unlock server access."
+      );
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId("verify_member")
-          .setLabel("✅ Verify Me")
+          .setCustomId(`verify_${role.id}`)
+          .setLabel("Channel Access ✅")
           .setStyle(ButtonStyle.Success)
       );
 
       return message.channel.send({
-        embeds: [
-          makeEmbed(
-            "🛡️・MEMBER VERIFICATION",
-            "Press **Verify Me** to receive the Verified role."
-          )
-        ],
+        embeds: [embed],
         components: [row]
       });
     }
+
+    // $ticketpanel @TicketStaff
+    if (command === "ticketpanel") {
+      if (!message.member.permissions.has("ManageChannels")) {
+        return message.reply("❌ You need Manage Channels permission.");
+      }
+
+      const staffRole = message.mentions.roles.first();
+
+      if (!staffRole) {
+        return message.reply("❌ Usage: `$ticketpanel @TicketStaff`");
+      }
+
+      const embed = makeEmbed(
+        "🎟️ CHILLING HANGOUT SUPPORTER",
+        "Need assistance? Our support team is here for you.\n\n" +
+        "✦ Member Support\n" +
+        "✦ Reports & Issues\n" +
+        "✦ General Questions\n\n" +
+        `**Chosen Staff Role:** <@&${staffRole.id}>\n\n` +
+        "Click below to open a private support ticket."
+      );
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`ticket_open_${staffRole.id}`)
+          .setLabel("Open Support Ticket 🎟️")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      return message.channel.send({
+        embeds: [embed],
+        components: [row]
+      });
+    }
+    
+
+
+
+
+
+    
     
     // PART 6: OWO-STYLE ECONOMY COMMANDS GO HERE
 
